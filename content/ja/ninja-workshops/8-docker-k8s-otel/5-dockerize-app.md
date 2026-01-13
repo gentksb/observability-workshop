@@ -1,60 +1,66 @@
 ---
-title: アプリケーションのDocker化
-linkTitle: 5. アプリケーションのDocker化
+title: Dockerize the Application
+linkTitle: 5. Dockerize the Application
 weight: 5
 time: 15 minutes
 ---
 
-このワークショップの後半では、.NET アプリケーションを Kubernetes クラスターにデプロイします。
+Later on in this workshop, we're going to deploy our .NET application into a Kubernetes cluster. 
 
-しかし、どのようにそれを行うのでしょうか？
+But how do we do that?  
 
-最初のステップは、アプリケーション用の Docker イメージを作成することです。これは
-アプリケーションの「Docker 化」として知られており、プロセスは`Dockerfile`の作成から始まります。
+The first step is to create a Docker image for our application.  This is known as 
+"dockerizing" and application, and the process begins with the creation of a `Dockerfile`. 
 
-しかし、まず重要な用語を定義しましょう。
+But first, let's define some key terms. 
 
-## 重要な用語
+## Key Terms 
 
-### Docker とは何ですか？
+### What is Docker?  
 
-> 「Docker は、コンテナと呼ばれる緩い分離環境でアプリケーションをパッケージ化して実行する機能を提供します。分離とセキュリティにより、指定されたホスト上で同時に多くのコンテナを実行できます。コンテナは軽量で、アプリケーションの実行に必要なすべてを含んでいるため、ホストにインストールされているものに依存する必要がありません。」
+_"Docker provides the ability to package and run an application in a loosely isolated environment
+called a container. The isolation and security lets you run many containers simultaneously on
+a given host. Containers are lightweight and contain everything needed to run the application,
+so you don't need to rely on what's installed on the host."_
 
-ソース: <https://docs.docker.com/get-started/docker-overview/>
+Source:  https://docs.docker.com/get-started/docker-overview/
 
-### コンテナとは何ですか？
+### What is a container? 
 
-> 「コンテナは、アプリのコンポーネントごとの分離されたプロセスです。各コンポーネントは...独自の分離された環境で実行され、マシン上の他のすべてのものから完全に分離されています。」
+_"Containers are isolated processes for each of your app's components. Each component
+...runs in its own isolated environment, 
+completely isolated from everything else on your machine."_
 
-ソース: <https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/>
+Source:  https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/
 
-### コンテナイメージとは何ですか？
+### What is a container image?
 
-> 「コンテナイメージは、コンテナを実行するためのすべてのファイル、バイナリ、ライブラリ、および設定を含む標準化されたパッケージです。」
+_"A container image is a standardized package that includes all of the files, binaries,
+libraries, and configurations to run a container."_
 
-### Dockerfile
+### Dockerfile 
 
-> 「Dockerfile は、コンテナイメージを作成するために使用されるテキストベースのドキュメントです。実行するコマンド、コピーするファイル、起動コマンドなどに関するイメージビルダーへの指示を提供します。」
+_"A Dockerfile is a text-based document that's used to create a container image. It provides
+instructions to the image builder on the commands to run, files to copy, startup command, and more."_
 
-## Dockerfile の作成
+## Create a Dockerfile 
 
-`/home/splunk/workshop/docker-k8s-otel/helloworld`ディレクトリに`Dockerfile`という名前のファイルを作成しましょう。
+Let's create a file named `Dockerfile` in the `/home/splunk/workshop/docker-k8s-otel/helloworld` directory. 
 
-```bash
+``` bash
 cd /home/splunk/workshop/docker-k8s-otel/helloworld
 ```
 
-ファイルの作成には vi または nano を使用できます。vi を使用した例を示します：
+You can use vi or nano to create the file. We will show an example using vi:
 
-```bash
+``` bash
 vi Dockerfile
 ```
+Copy and paste the following content into the newly opened file:
 
-新しく開いたファイルに以下の内容をコピー＆ペーストします：
+> Press 'i' to enter into insert mode in vi before pasting the text below.
 
-> 以下のテキストを貼り付ける前に、vi で「i」を押して挿入モードに入ってください。
-
-```dockerfile
+``` dockerfile
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 USER app
 WORKDIR /app
@@ -80,55 +86,57 @@ COPY --from=publish /app/publish .
 ENTRYPOINT ["dotnet", "helloworld.dll"]
 ```
 
-> vi での変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+> To save your changes in vi, press the `esc` key to enter command mode, then type `:wq!` followed by pressing the `enter/return` key.
 
-これはすべて何を意味するのでしょうか？詳しく見てみましょう。
 
-## Dockerfile の詳細解説
+What does all this mean?  Let's break it down. 
 
-この例では、マルチステージ Dockerfile を使用しており、Docker イメージ作成プロセスを以下のステージに分けています：
+## Walking through the Dockerfile 
 
-- Base（ベース）
-- Build（ビルド）
-- Publish（パブリッシュ）
-- Final（最終）
+We've used a multi-stage Dockerfile for this example, which separates the Docker image creation process into the following stages: 
 
-マルチステージアプローチはより複雑ですが、デプロイメント用により
-軽量なランタイムイメージを作成することができます。以下では、
-これらの各ステージの目的を説明します。
+* Base
+* Build
+* Publish
+* Final
 
-### ベースステージ
+While a multi-stage approach is more complex, it allows us to create a 
+lighter-weight runtime image for deployment.  We'll explain the purpose of 
+each of these stages below. 
 
-ベースステージでは、アプリを実行するユーザー、作業ディレクトリを定義し、
-アプリにアクセスするために使用されるポートを公開します。
-これは Microsoft の`mcr.microsoft.com/dotnet/aspnet:8.0`イメージをベースにしています：
+### The Base Stage
 
-```dockerfile
+The base stage defines the user that will 
+be running the app, the working directory, and exposes 
+the port that will be used to access the app. 
+It's based off of Microsoft's `mcr.microsoft.com/dotnet/aspnet:8.0` image: 
+
+``` dockerfile
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 USER app
 WORKDIR /app
 EXPOSE 8080
 ```
 
-なお、`mcr.microsoft.com/dotnet/aspnet:8.0`イメージには.NET runtime のみが含まれており、
-SDK は含まれていないため、比較的軽量です。これは Debian 12 Linux
-distribution がベースになっています。ASP.NET Core Runtime Docker イメージの詳細については
-[GitHub](https://github.com/dotnet/dotnet-docker/blob/main/README.aspnet.md)で確認できます。
+Note that the `mcr.microsoft.com/dotnet/aspnet:8.0` image includes the .NET runtime only, 
+rather than the SDK, so is relatively lightweight. It's based off of the Debian 12 Linux 
+distribution.  You can find more information about the ASP.NET Core Runtime Docker images 
+in [GitHub](https://github.com/dotnet/dotnet-docker/blob/main/README.aspnet.md). 
 
-### Build ステージ
+### The Build Stage
 
-Dockerfile の次のステージは build ステージです。このステージでは、
-`mcr.microsoft.com/dotnet/sdk:8.0`イメージが使用されます。これも Debian 12 がベースになっていますが、
-runtime だけでなく完全な[.NET SDK](https://github.com/dotnet/dotnet-docker/blob/main/README.sdk.md)が含まれています。
+The next stage of the Dockerfile is the build stage.  For this stage, the 
+`mcr.microsoft.com/dotnet/sdk:8.0` image is used, which is also based off of 
+Debian 12 but includes the full [.NET SDK](https://github.com/dotnet/dotnet-docker/blob/main/README.sdk.md) rather than just the runtime.  
 
-このステージでは`.csproj`ファイルを build イメージにコピーし、その後`dotnet restore`を使用して
-アプリケーションが使用する依存関係をダウンロードします。
+This stage copies the `.csproj` file to the build image, and then uses `dotnet restore` to 
+download any dependencies used by the application. 
 
-次に、アプリケーションコードを build イメージにコピーし、
-`dotnet build`を使用してプロジェクトとその依存関係を
-`.dll`バイナリのセットにビルドします：
+It then copies the application code to the build image and 
+uses `dotnet build` to build the project and its dependencies into a 
+set of `.dll` binaries: 
 
-```dockerfile
+``` dockerfile
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
@@ -139,24 +147,24 @@ COPY . .
 RUN dotnet build "./helloworld.csproj" -c $BUILD_CONFIGURATION -o /app/build
 ```
 
-### Publish ステージ
+### The Publish Stage
 
-3 番目のステージは publish で、これは Microsoft イメージではなく build ステージイメージをベースにしています。このステージでは、`dotnet publish`を使用して
-アプリケーションとその依存関係を deployment 用にパッケージ化します：
+The third stage is publish, which is based on build stage image rather than a Microsoft image.  In this stage, `dotnet publish` is used to 
+package the application and its dependencies for deployment: 
 
-```dockerfile
+``` dockerfile
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
 RUN dotnet publish "./helloworld.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
 ```
 
-### Final ステージ
+### The Final Stage 
 
-4 番目のステージは最終ステージで、これは base
-ステージイメージをベースにしています（build と publish ステージよりも軽量）。publish ステージイメージからの出力をコピーし、
-アプリケーションの entry point を定義します：
+The fourth stage is our final stage, which is based on the base 
+stage image (which is lighter-weight than the build and publish stages). It copies the output from the publish stage image and 
+defines the entry point for our application: 
 
-```dockerfile
+``` dockerfile
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
@@ -164,22 +172,20 @@ COPY --from=publish /app/publish .
 ENTRYPOINT ["dotnet", "helloworld.dll"]
 ```
 
-## Docker イメージのビルド
+## Build a Docker Image
 
-`Dockerfile`ができたので、これを使用してアプリケーションを含む Docker イメージを
-ビルドできます：
+Now that we have the `Dockerfile`, we can use it to build a Docker image containing 
+our application: 
 
 {{< tabs >}}
 {{% tab title="Script" %}}
-
-```bash
+``` bash
 docker build -t helloworld:1.0 .
 ```
-
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
+``` bash
 DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
             Install the buildx component to build images with BuildKit:
             https://docs.docker.com/go/buildx/
@@ -187,37 +193,36 @@ DEPRECATED: The legacy builder is deprecated and will be removed in a future rel
 Sending build context to Docker daemon  281.1kB
 Step 1/19 : FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 8.0: Pulling from dotnet/aspnet
-af302e5c37e9: Pull complete
-91ab5e0aabf0: Pull complete
-1c1e4530721e: Pull complete
-1f39ca6dcc3a: Pull complete
-ea20083aa801: Pull complete
-64c242a4f561: Pull complete
+af302e5c37e9: Pull complete 
+91ab5e0aabf0: Pull complete 
+1c1e4530721e: Pull complete 
+1f39ca6dcc3a: Pull complete 
+ea20083aa801: Pull complete 
+64c242a4f561: Pull complete 
 Digest: sha256:587c1dd115e4d6707ff656d30ace5da9f49cec48e627a40bbe5d5b249adc3549
 Status: Downloaded newer image for mcr.microsoft.com/dotnet/aspnet:8.0
  ---> 0ee5d7ddbc3b
 Step 2/19 : USER app
 etc,
 ```
-
 {{% /tab %}}
 {{< /tabs >}}
 
-これは、現在のディレクトリの`Dockerfile`を使用して`helloworld:1.0`のタグでイメージをビルドするよう Docker に指示します。
+This tells Docker to build an image using a tag of `helloworld:1.0` using the `Dockerfile` in the current directory. 
 
-以下のコマンドで正常に作成されたことを確認できます：
+We can confirm it was created successfully with the following command: 
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
 docker images
 ```
 
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
+``` bash
 REPOSITORY   TAG       IMAGE ID       CREATED          SIZE
 helloworld   1.0       db19077b9445   20 seconds ago   217MB
 ```
@@ -225,13 +230,13 @@ helloworld   1.0       db19077b9445   20 seconds ago   217MB
 {{% /tab %}}
 {{< /tabs >}}
 
-## Docker イメージのテスト
+## Test the Docker Image
 
-> 続行する前に、以前に開始したアプリケーションがインスタンス上で実行されていないことを確認してください。
+> Before proceeding, ensure the application we started before is no longer running on your instance. 
 
-Docker イメージを使用して以下のようにアプリケーションを実行できます：
+We can run our application using the Docker image as follows: 
 
-```bash
+``` bash
 docker run --name helloworld \
 --detach \
 --expose 8080 \
@@ -239,24 +244,24 @@ docker run --name helloworld \
 helloworld:1.0
 ```
 
-> 注意：`--network=host`パラメータを含めて、Docker コンテナが
-> インスタンス上のリソースにアクセスできるようにしています。これは後でアプリケーションが
-> localhost 上で実行されているコレクターにデータを送信する必要がある場合に重要です。
+> Note: we've included the `--network=host` parameter to ensure our Docker container 
+> is able to access resources on our instance, which is important later on when we need 
+> our application to send data to the collector running on localhost. 
 
-Docker コンテナが実行されていることを確認しましょう：
+Let's ensure that our Docker container is running: 
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
-docker ps
+``` bash
+docker ps | grep helloworld
 ```
 
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
-$ docker ps
+``` bash
+$ docker ps | grep helloworld
 CONTAINER ID   IMAGE            COMMAND                  CREATED       STATUS       PORTS     NAMES
 5f5b9cd56ac5   helloworld:1.0   "dotnet helloworld.d…"   2 mins ago    Up 2 mins              helloworld
 ```
@@ -264,23 +269,23 @@ CONTAINER ID   IMAGE            COMMAND                  CREATED       STATUS   
 {{% /tab %}}
 {{< /tabs >}}
 
-以前と同様にアプリケーションにアクセスできます：
+We can access our application as before:
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
 curl http://localhost:8080/hello/Docker
 ```
 
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
-Hello, Docker!
+``` bash
+Hello, Docker! 
 ```
 
 {{% /tab %}}
 {{< /tabs >}}
 
-おめでとうございます。ここまで到達したということは、.NET アプリケーションの Docker 化に成功したということです。
+Congratulations, if you've made it this far, you've successfully Dockerized a .NET application. 

@@ -1,35 +1,35 @@
 ---
-title: Dockerfileに計装を追加する
-linkTitle: 6. Dockerfileに計装を追加する
+title: Add Instrumentation to Dockerfile
+linkTitle: 6. Add Instrumentation to Dockerfile
 weight: 6
 time: 10 minutes
 ---
 
-アプリケーションを正常に Docker 化したので、次に OpenTelemetry による計装 を追加しましょう。
+Now that we've successfully Dockerized our application, let's add in OpenTelemetry instrumentation. 
 
-これは、Linux で実行しているアプリケーションを計装した際の手順と似ていますが、
-注意すべきいくつかの重要な違いがあります。
+This is similar to the steps we took when instrumenting the application running on Linux, but there 
+are some key differences to be aware of. 
 
-## Dockerfile の更新
+## Update the Dockerfile 
 
-`/home/splunk/workshop/docker-k8s-otel/helloworld`ディレクトリの`Dockerfile`を更新しましょう。
+Let's update the `Dockerfile` in the `/home/splunk/workshop/docker-k8s-otel/helloworld` directory.  
 
-Dockerfile で.NET アプリケーションがビルドされた後、以下の操作を行いたいと思います：
+After the .NET application is built in the Dockerfile, we want to: 
 
-- `splunk-otel-dotnet-install.sh`をダウンロードして実行するために必要な依存関係を追加する
-- Splunk OTel .NET インストーラーをダウンロードする
-- ディストリビューションをインストールする
+* Add dependencies needed to download and execute `splunk-otel-dotnet-install.sh`
+* Download the Splunk OTel .NET installer
+* Install the distribution
 
-Dockerfile のビルドステージに以下を追加できます。vi で Dockerfile を開きましょう：
+We can add the following to the build stage of the Dockerfile. Let's open the Dockerfile in vi:
 
-```bash
+``` bash
 vi /home/splunk/workshop/docker-k8s-otel/helloworld/Dockerfile
 ```
+> Press the i key to enter edit mode in vi
 
-> vi では「i」キーを押して編集モードに入ります
-> 'NEW CODE'とマークされている行を Dockerfile のビルドステージセクションに貼り付けてください：
+> Paste the lines marked with 'NEW CODE' into your Dockerfile in the build stage section:
 
-```dockerfile
+``` dockerfile
 # CODE ALREADY IN YOUR DOCKERFILE:
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG BUILD_CONFIGURATION=Release
@@ -42,7 +42,7 @@ RUN dotnet build "./helloworld.csproj" -c $BUILD_CONFIGURATION -o /app/build
 
 # NEW CODE: add dependencies for splunk-otel-dotnet-install.sh
 RUN apt-get update && \
- apt-get install -y unzip
+	apt-get install -y unzip
 
 # NEW CODE: download Splunk OTel .NET installer
 RUN curl -sSfL https://github.com/signalfx/splunk-otel-dotnet/releases/latest/download/splunk-otel-dotnet-install.sh -O
@@ -51,19 +51,19 @@ RUN curl -sSfL https://github.com/signalfx/splunk-otel-dotnet/releases/latest/do
 RUN sh ./splunk-otel-dotnet-install.sh
 ```
 
-次に、以下の変更で Dockerfile の最終ステージを更新します：
+Next, we'll update the final stage of the Dockerfile with the following changes: 
 
-- ビルドイメージから最終イメージに/root/.splunk-otel-dotnet/をコピーする
-- entrypoint.sh ファイルもコピーする
-- `OTEL_SERVICE_NAME`と`OTEL_RESOURCE_ATTRIBUTES`環境変数を設定する
-- `ENTRYPOINT`を`entrypoint.sh`に設定する
+* Copy the /root/.splunk-otel-dotnet/ from the build image to the final image 
+* Copy the entrypoint.sh file as well 
+* Set the `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` environment variables 
+* Set the `ENTRYPOINT` to `entrypoint.sh` 
 
-最も簡単な方法は、最終ステージ全体を以下の内容で置き換えることです：
+It's easiest to simply replace the entire final stage with the following:
 
-> **重要** Dockerfile の`$INSTANCE`をあなたのインスタンス名に置き換えてください。
-> インスタンス名は`echo $INSTANCE`を実行することで確認できます。
+> **IMPORTANT** replace `$INSTANCE` in your Dockerfile with your instance name,
+> which can be determined by running `echo $INSTANCE`.
 
-```dockerfile
+``` dockerfile 
 # CODE ALREADY IN YOUR DOCKERFILE
 FROM base AS final
 
@@ -82,20 +82,20 @@ COPY entrypoint.sh .
 ENV OTEL_SERVICE_NAME=helloworld
 ENV OTEL_RESOURCE_ATTRIBUTES='deployment.environment=otel-$INSTANCE'
 
-# NEW CODE: replace the prior ENTRYPOINT command with the following two lines
+# NEW CODE: replace the prior ENTRYPOINT command with the following two lines 
 ENTRYPOINT ["sh", "entrypoint.sh"]
 CMD ["dotnet", "helloworld.dll"]
 ```
 
-> vi での変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+> To save your changes in vi, press the `esc` key to enter command mode, then type `:wq!` followed by pressing the `enter/return` key.
 
-これらすべての変更の後、Dockerfile は以下のようになるはずです：
+After all of these changes, the Dockerfile should look like the following: 
 
-> **重要** このコンテンツを自分の Dockerfile にコピー＆ペーストする場合は、
-> Dockerfile の`$INSTANCE`をあなたのインスタンス名に置き換えてください。
-> インスタンス名は`echo $INSTANCE`を実行することで確認できます。
+> **IMPORTANT** if you're going to copy and paste this content into your own Dockerfile, 
+> replace `$INSTANCE` in your Dockerfile with your instance name,
+> which can be determined by running `echo $INSTANCE`.
 
-```dockerfile
+``` dockerfile 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 USER app
 WORKDIR /app
@@ -112,7 +112,7 @@ RUN dotnet build "./helloworld.csproj" -c $BUILD_CONFIGURATION -o /app/build
 
 # NEW CODE: add dependencies for splunk-otel-dotnet-install.sh
 RUN apt-get update && \
- apt-get install -y unzip
+	apt-get install -y unzip
 
 # NEW CODE: download Splunk OTel .NET installer
 RUN curl -sSfL https://github.com/signalfx/splunk-otel-dotnet/releases/latest/download/splunk-otel-dotnet-install.sh -O
@@ -140,23 +140,23 @@ COPY entrypoint.sh .
 ENV OTEL_SERVICE_NAME=helloworld
 ENV OTEL_RESOURCE_ATTRIBUTES='deployment.environment=otel-$INSTANCE'
 
-# NEW CODE: replace the prior ENTRYPOINT command with the following two lines
+# NEW CODE: replace the prior ENTRYPOINT command with the following two lines 
 ENTRYPOINT ["sh", "entrypoint.sh"]
 CMD ["dotnet", "helloworld.dll"]
 ```
 
-## entrypoint.sh ファイルの作成
 
-また、`/home/splunk/workshop/docker-k8s-otel/helloworld`フォルダに`entrypoint.sh`という名前のファイルを
-以下の内容で作成する必要があります：
+## Create the entrypoint.sh file
 
-```bash
+We also need to create a file named `entrypoint.sh` in the `/home/splunk/workshop/docker-k8s-otel/helloworld` folder 
+with the following content: 
+
+``` bash
 vi /home/splunk/workshop/docker-k8s-otel/helloworld/entrypoint.sh
 ```
+Then paste the following code into the newly created file:
 
-次に、新しく作成したファイルに以下のコードを貼り付けます：
-
-```bash
+``` bash
 #!/bin/sh
 # Read in the file of environment settings
 . /$HOME/.splunk-otel-dotnet/instrument.sh
@@ -164,61 +164,54 @@ vi /home/splunk/workshop/docker-k8s-otel/helloworld/entrypoint.sh
 # Then run the CMD
 exec "$@"
 ```
+> To save your changes in vi, press the `esc` key to enter command mode, then type `:wq!` followed by pressing the `enter/return` key.
 
-> vi での変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+The `entrypoint.sh` script is required for sourcing environment variables from the instrument.sh script, 
+which is included with the instrumentation. This ensures the correct setup of environment variables 
+for each platform.
 
-`entrypoint.sh`スクリプトは、計装に含まれる instrument.sh スクリプトが環境変数を**コンテナ起動時に**取得するために必要です。これにより、各プラットフォームに対して環境変数が正しく設定されることが保証されます。
-
-> 「なぜ Linux ホスト上で OpenTelemetry .NET instrumentation を有効化したときのように、
-> Dockerfile に以下のコマンドを含めるだけではだめなのか？」と疑問に思うかもしれません。
->
-> ```dockerfile
+> You may be wondering, why can't we just include the following command in the Dockerfile to do this, 
+> like we did when activating OpenTelemetry .NET instrumentation on our Linux host? 
+> ``` dockerfile
 > RUN . $HOME/.splunk-otel-dotnet/instrument.sh
 > ```
->
-> この方法の問題点は、各 Dockerfile RUN ステップが新しいコンテナと新しいシェルで実行されることです。
-> あるシェルで環境変数を設定しようとしても、後で見ることはできません。
-> この問題は、ここで行ったようにエントリポイントスクリプトを使用することで解決されます。
-> この問題についての詳細は、こちらの[Stack Overflow の投稿](https://stackoverflow.com/questions/55921914/how-to-source-a-script-with-environment-variables-in-a-docker-build-process)を参照してください。
+> The problem with this approach is that each Dockerfile RUN step runs a new container and a new shell. 
+> If you try to set an environment variable in one shell, it will not be visible later on.
+> This problem is resolved by using an entry point script, as we've done here. 
+> Refer to this [Stack Overflow post](https://stackoverflow.com/questions/55921914/how-to-source-a-script-with-environment-variables-in-a-docker-build-process) 
+> for further details on this issue. 
 
-## Docker イメージのビルド
+## Build the Docker Image 
 
-OpenTelemetry .NET instrumentation を含む新しい Docker イメージをビルドしましょう：
+Let's build a new Docker image that includes the OpenTelemetry .NET instrumentation: 
 
-```bash
+``` bash
 docker build -t helloworld:1.1 .
 ```
 
-> 注：以前のバージョンと区別するために、異なるバージョン（1.1）を使用しています。
-> 古いバージョンをクリーンアップするには、以下のコマンドでコンテナ ID を取得します：
->
-> ```bash
-> docker ps -a
+> Note: we've used a different version (1.1) to distinguish the image from our earlier version. 
+> To clean up the older versions, run the following command to get the container id:  
+> ``` bash
+> docker ps -a | grep helloworld
 > ```
->
-> 次に、以下のコマンドでコンテナを削除します：
->
-> ```bash
+> Then run the following command to delete the container: 
+> ``` bash
 > docker rm <old container id> --force
 > ```
->
-> 次にコンテナイメージ ID を取得します：
->
-> ```bash
+> Now we can get the container image id:
+> ``` bash
 > docker images | grep 1.0
 > ```
->
-> 最後に、以下のコマンドで古いイメージを削除できます：
->
-> ```bash
+> Finally, we can run the following command to delete the old image: 
+> ``` bash
 > docker image rm <old image id>
 > ```
 
-## アプリケーションの実行
+## Run the Application 
 
-新しい Docker イメージを実行しましょう：
+Let's run the new Docker image: 
 
-```bash
+``` bash
 docker run --name helloworld \
 --detach \
 --expose 8080 \
@@ -226,55 +219,56 @@ docker run --name helloworld \
 helloworld:1.1
 ```
 
-以下を使用してアプリケーションにアクセスできます：
+We can access the application using: 
 
-```bash
+``` bash
 curl http://localhost:8080/hello
 ```
 
-トラフィックを生成するために上記のコマンドを数回実行しましょう。
+Execute the above command a few times to generate some traffic.  
 
-1 分ほど経過したら、Splunk Observability Cloud に新しいトレースが表示されることを確認します。
+After a minute or so, confirm that you see new traces in Splunk Observability Cloud. 
 
-> あなたの特定の環境でトレースを探すことを忘れないでください。
+> Remember to look for traces in your particular Environment. 
+ 
+## Troubleshooting
 
-## トラブルシューティング
+If you don't see traces appear in Splunk Observability Cloud, here's how you can troubleshoot. 
 
-Splunk Observability Cloud にトレースが表示されない場合は、以下のようにトラブルシューティングを行うことができます。
+First, open the collector config file for editing: 
 
-まず、コレクター設定ファイルを編集用に開きます：
-
-```bash
+``` bash
 sudo vi /etc/otel/collector/agent_config.yaml
 ```
 
-次に、トレースパイプラインにデバッグエクスポーターを追加します。これにより、トレースがコレクターログに書き込まれるようになります：
+Next, add the debug exporter to the traces pipeline, which ensures the traces are written to the collector logs:
 
-```yaml
+``` yaml
 service:
-  extensions: [health_check, http_forwarder, zpages, smartagent]
+  extensions: [headers_setter, health_check, http_forwarder, zpages, smartagent]
   pipelines:
     traces:
       receivers: [jaeger, otlp, zipkin]
       processors:
-        - memory_limiter
-        - batch
-        - resourcedetection
+      - memory_limiter
+      - batch
+      - resourcedetection
       #- resource/add_environment
-      # NEW CODE: デバッグエクスポーターをここに追加
+      # NEW CODE: add the debug exporter here
       exporters: [otlphttp, signalfx, debug]
 ```
 
-その後、コレクターを再起動して設定変更を適用します：
+Then, restart the collector to apply the configuration changes: 
 
-```bash
+``` bash
 sudo systemctl restart splunk-otel-collector
 ```
 
-`journalctl`を使用してコレクターログを表示できます：
+We can then view the collector logs using `journalctl`:
 
-> ログの追跡を終了するには、Ctrl + C を押します。
+> Press Ctrl + C to exit out of tailing the log.
 
-```bash
+``` bash
 sudo journalctl -u splunk-otel-collector -f -n 100
 ```
+

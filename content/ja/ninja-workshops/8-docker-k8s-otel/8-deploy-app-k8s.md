@@ -1,87 +1,81 @@
 ---
-title: アプリケーションをK8sにデプロイ
-linkTitle: 8. アプリケーションをK8sにデプロイ
+title: Deploy Application to K8s
+linkTitle: 8. Deploy Application to K8s
 weight: 8
 time: 15 minutes
 ---
 
-## Dockerfile の更新
+## Update the Dockerfile
 
-Kubernetes では、環境変数は通常、Docker イメージに組み込むのではなく`.yaml`マニフェストファイルで管理されます。そこで、Dockerfile から以下の 2 つの環境変数を削除しましょう：
+With Kubernetes, environment variables are typically managed in the `.yaml` manifest files rather 
+than baking them into the Docker image.  So let's remove the following two environment variables from the Dockerfile:
 
-```bash
+``` bash
 vi /home/splunk/workshop/docker-k8s-otel/helloworld/Dockerfile
 ```
+Then remove the following two environment variables: 
 
-次に、以下の 2 つの環境変数を削除します：
-
-```dockerfile
+``` dockerfile
 ENV OTEL_SERVICE_NAME=helloworld
 ENV OTEL_RESOURCE_ATTRIBUTES='deployment.environment=otel-$INSTANCE'
 ```
+> To save your changes in vi, press the `esc` key to enter command mode, then type `:wq!` followed by pressing the `enter/return` key.
 
-> vi での変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+## Build a new Docker Image 
 
-## 新しい Docker イメージのビルド
+Let's build a new Docker image that excludes the environment variables:
 
-環境変数を除外した新しい Docker イメージをビルドしましょう：
-
-```bash
-cd /home/splunk/workshop/docker-k8s-otel/helloworld
+``` bash
+cd /home/splunk/workshop/docker-k8s-otel/helloworld 
 
 docker build -t helloworld:1.2 .
 ```
 
 > Note: we've used a different version (1.2) to distinguish the image from our earlier version.
 > To clean up the older versions, run the following command to get the container id:
->
-> ```bash
-> docker ps -a
+> ``` bash
+> docker ps -a | grep helloworld
 > ```
->
 > Then run the following command to delete the container:
->
-> ```bash
+> ``` bash
 > docker rm <old container id> --force
 > ```
->
 > Now we can get the container image id:
->
-> ```bash
+> ``` bash
 > docker images | grep 1.1
 > ```
->
 > Finally, we can run the following command to delete the old image:
->
-> ```bash
+> ``` bash
 > docker image rm <old image id>
 > ```
 
-## Docker イメージを Kubernetes にインポート
+## Import the Docker Image to Local Container Repository 
 
-通常であれば、Docker イメージを Docker Hub などのリポジトリにプッシュします。
-しかし、今回のセッションでは、k3s に直接インポートする回避策を使用します。
+Normally we’d push our Docker image to a repository such as Docker Hub.
+But for this workshop, we’ll push the Docker image to the local container 
+repository running on our EC2 instance at `localhost:9999`
 
-```bash
-cd /home/splunk
+``` bash
+# Update the image tag
+docker tag helloworld:1.2 localhost:9999/helloworld:1.2
 
-# Import the image into k3d
-sudo k3d image import helloworld:1.2 --cluster $INSTANCE-cluster
+# Import the image into the local repository
+docker push localhost:9999/helloworld:1.2
 ```
 
-## .NET アプリケーションのデプロイ
+## Deploy the .NET Application
 
-> ヒント：vi で編集モードに入るには「i」キーを押します。変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+> Hint: To enter edit mode in vi, press the 'i' key. To save changes, press the `esc` key to enter command mode, then type `:wq!` followed by pressing the `enter/return` key. 
 
-.NET アプリケーションを K8s にデプロイするために、`/home/splunk`に`deployment.yaml`という名前のファイルを作成しましょう：
+To deploy our .NET application to K8s, let's create a file named `deployment.yaml` in `/home/splunk`:
 
-```bash
+``` bash
 vi /home/splunk/deployment.yaml
 ```
 
-そして以下を貼り付けます：
+And paste in the following:
 
-```yaml
+``` yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -98,27 +92,26 @@ spec:
     spec:
       containers:
         - name: helloworld
-          image: docker.io/library/helloworld:1.2
-          imagePullPolicy: Never
+          image: localhost:9999/helloworld:1.2
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
             - name: PORT
               value: "8080"
 ```
+> [!tip]- What is a Deployment in Kubernetes?
+> The deployment.yaml file is a kubernetes config file that is used to define a deployment resource. This file is the cornerstone of managing applications in Kubernetes! The deployment config defines the deployment’s ***desired state*** and Kubernetes then ensures the ***actual*** state matches it. This allows application pods to self-heal and also allows for easy updates or roll backs to applications.
 
-> [!tip]- Kubernetes における Deployment とは？
-> deployment.yaml ファイルは、deployment リソースを定義するために使用される kubernetes 設定ファイルです。このファイルは Kubernetes でアプリケーションを管理するための基盤となります！deployment 設定は deployment の **_望ましい状態_** を定義し、Kubernetes が **_実際の状態_** がそれと一致するよう保証します。これにより、アプリケーション pod の自己修復が可能になり、アプリケーションの簡単な更新やロールバックも可能になります。
+Then, create a second file in the same directory named `service.yaml`: 
 
-次に、同じディレクトリに`service.yaml`という名前の 2 つ目のファイルを作成します：
-
-```bash
+``` bash
 vi /home/splunk/service.yaml
 ```
 
-そして以下を貼り付けます：
+And paste in the following: 
 
-```yaml
+``` yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -134,89 +127,106 @@ spec:
       protocol: TCP
 ```
 
-> [!tip]- Kubernetes における Service とは？
-> Kubernetes の Service は抽象化レイヤーであり、仲介者のような役割を果たします。Pod にアクセスするための固定 IP アドレスや DNS 名を提供し、時間の経過とともに Pod が追加、削除、または交換されても同じままです。
+> [!tip]- What is a Service in Kubernetes?
+> A Service in Kubernetes is an abstraction layer, working like a middleman, giving you a fixed IP address or DNS name to access your Pods, which stays the same, even if Pods are added, removed, or replaced over time. 
 
-これらのマニフェストファイルを使用してアプリケーションをデプロイできます：
+Then, create a third file in the same directory named `ingress.yaml`:
+
+``` bash
+vi /home/splunk/ingress.yaml
+```
+
+And paste in the following:
+
+``` yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: helloworld-ingress
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: helloworld.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: helloworld
+                port:
+                  number: 8080
+```
+
+We can then use these manifest files to deploy our application: 
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
+cd /home/splunk
+
 # create the deployment
 kubectl apply -f deployment.yaml
 
 # create the service
 kubectl apply -f service.yaml
+
+# create the ingress
+kubectl apply -f ingress.yaml
 ```
 
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
+``` bash
 deployment.apps/helloworld created
 service/helloworld created
+ingress.networking.k8s.io/helloworld-ingress created
 ```
 
 {{% /tab %}}
 {{< /tabs >}}
 
-## アプリケーションのテスト
+## Test the Application
 
-アプリケーションにアクセスするには、まず IP アドレスを取得する必要があります：
+Use the following command to access the application: 
 
-{{< tabs >}}
-{{% tab title="Script" %}}
-
-```bash
-kubectl describe svc helloworld | grep IP:
+``` bash
+curl http://helloworld.localhost/hello/Kubernetes
 ```
 
-{{% /tab %}}
-{{% tab title="Example Output" %}}
+## Configure OpenTelemetry 
 
-```bash
-IP:                10.43.102.103
+The .NET OpenTelemetry instrumentation was already baked into the Docker image.  But we need to set a few 
+environment variables to tell it where to send the data. 
+
+Add the following to `deployment.yaml` file you created earlier: 
+
+> **IMPORTANT** replace `$INSTANCE` in the YAML below with your instance name,
+> which can be determined by running `echo $INSTANCE`.
+
+``` yaml
+          env:
+            - name: PORT
+              value: "8080"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE_IP):4318"
+            - name: OTEL_SERVICE_NAME
+              value: "helloworld"
+            - name: OTEL_RESOURCE_ATTRIBUTES 
+              value: "deployment.environment=otel-$INSTANCE" 
 ```
 
-{{% /tab %}}
-{{< /tabs >}}
+The complete `deployment.yaml` file should be as follows (with **your** instance name rather than `$INSTANCE`): 
 
-その後、前のコマンドから返された Cluster IP を使用してアプリケーションにアクセスできます。
-例：
-
-```bash
-curl http://10.43.102.103:8080/hello/Kubernetes
-```
-
-## OpenTelemetry の設定
-
-.NET OpenTelemetry 計装はすでに Docker イメージに組み込まれています。しかし、データの送信先を指定するためにいくつかの環境変数を設定する必要があります。
-
-先ほど作成した`deployment.yaml`ファイルに以下を追加します：
-
-> **重要** 以下の YAML の`$INSTANCE`をあなたのインスタンス名に置き換えてください。
-> インスタンス名は`echo $INSTANCE`を実行することで確認できます。
-
-```yaml
-env:
-  - name: PORT
-    value: "8080"
-  - name: NODE_IP
-    valueFrom:
-      fieldRef:
-        fieldPath: status.hostIP
-  - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://$(NODE_IP):4318"
-  - name: OTEL_SERVICE_NAME
-    value: "helloworld"
-  - name: OTEL_RESOURCE_ATTRIBUTES
-    value: "deployment.environment=otel-$INSTANCE"
-```
-
-完全な`deployment.yaml`ファイルは以下のようになります（`$INSTANCE`ではなく**あなたの**インスタンス名を使用してください）：
-
-```yaml
+``` yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -233,8 +243,8 @@ spec:
     spec:
       containers:
         - name: helloworld
-          image: docker.io/library/helloworld:1.2
-          imagePullPolicy: Never
+          image: localhost:9999/helloworld:1.2
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
@@ -248,102 +258,95 @@ spec:
               value: "http://$(NODE_IP):4318"
             - name: OTEL_SERVICE_NAME
               value: "helloworld"
-            - name: OTEL_RESOURCE_ATTRIBUTES
-              value: "deployment.environment=otel-$INSTANCE"
+            - name: OTEL_RESOURCE_ATTRIBUTES 
+              value: "deployment.environment=otel-$INSTANCE" 
 ```
 
-以下のコマンドで変更を適用します：
+Apply the changes with: 
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
 kubectl apply -f deployment.yaml
 ```
-
 {{% /tab %}}
 {{% tab title="Example Output" %}}
-
-```bash
+``` bash
 deployment.apps/helloworld configured
 ```
-
 {{% /tab %}}
 {{< /tabs >}}
 
-その後、`curl`を使用してトラフィックを生成します。
+Then use the following command to generate some traffic: 
 
-1 分ほど経過すると、o11y cloud でトレースが流れているのが確認できるはずです。ただし、より早くトレースを確認したい場合は、以下の方法があります...
+``` bash
+curl http://helloworld.localhost/hello/Kubernetes
+```
 
-## チャレンジ
+After a minute or so, you should see traces flowing in the o11y cloud. But, if you want to see your trace sooner, we have ... 
 
-開発者として、トレース ID を素早く取得するか、コンソールフィードバックを見たい場合、deployment.yaml ファイルにどのような環境変数を追加できるでしょうか？
+## A Challenge For You
+
+If you are a developer and just want to quickly grab the trace id or see console feedback, what environment variable could you add to the deployment.yaml file?
 
 <details>
-  <summary><b>答えを見るにはここをクリック</b></summary>
+  <summary><b>Click here to see the answer</b></summary>
 
-セクション 4「.NET Application を OpenTelemetry で計装する」のチャレンジで思い出していただければ、`OTEL_TRACES_EXPORTER`環境変数を使って trace を console に書き込むトリックをお見せしました。この変数を deployment.yaml に追加し、アプリケーションを再 deploy して、helloworld アプリから log を tail することで、trace id を取得して Splunk Observability Cloud で trace を見つけることができます。（ワークショップの次のセクションでは、debug exporter の使用についても説明します。これは K8s 環境でアプリケーションを debug する際の典型的な方法です。）
+If you recall in our challenge from Section 4, *Instrument a .NET Application with OpenTelemetry*, we showed you a trick to write traces to the console using the `OTEL_TRACES_EXPORTER` environment variable. We can add this variable to our deployment.yaml, redeploy our application, and tail the logs from our helloworld app so that we can grab the trace id to then find the trace in Splunk Observability Cloud. (In the next section of our workshop, we will also walk through using the debug exporter, which is how you would typically debug your application in a K8s environment.)
 
-まず、vi で deployment.yaml ファイルを開きます：
+First, open the deployment.yaml file in vi:
 
-```bash
+``` bash
 vi deployment.yaml
 
 ```
+Then, add the `OTEL_TRACES_EXPORTER` environment variable: 
 
-次に、`OTEL_TRACES_EXPORTER`環境変数を追加します：
-
-```yaml
-env:
-  - name: PORT
-    value: "8080"
-  - name: NODE_IP
-    valueFrom:
-      fieldRef:
-        fieldPath: status.hostIP
-  - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://$(NODE_IP):4318"
-  - name: OTEL_SERVICE_NAME
-    value: "helloworld"
-  - name: OTEL_RESOURCE_ATTRIBUTES
-    value: "deployment.environment=YOURINSTANCE"
-  # NEW VALUE HERE:
-  - name: OTEL_TRACES_EXPORTER
-    value: "otlp,console"
+``` yaml
+          env:
+            - name: PORT
+              value: "8080"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE_IP):4318"
+            - name: OTEL_SERVICE_NAME
+              value: "helloworld"
+            - name: OTEL_RESOURCE_ATTRIBUTES 
+              value: "deployment.environment=YOURINSTANCE"
+            # NEW VALUE HERE:
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp,console" 
 ```
-
-変更を保存してからアプリケーションを再 deploy します：
+Save your changes then redeploy the application:
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
 kubectl apply -f deployment.yaml
 ```
-
 {{% /tab %}}
 {{% tab title="Example Output" %}}
-
 ```bash
 deployment.apps/helloworld configured
 ```
-
 {{% /tab %}}
 {{< /tabs >}}
 
-helloworld の log を tail します：
+Tail the helloworld logs:
 
 {{< tabs >}}
 {{% tab title="Script" %}}
-
-```bash
+``` bash
 kubectl logs -l app=helloworld -f
 ```
-
 {{% /tab %}}
 {{% tab title="Example Output" %}}
-
-```bash
+``` bash
 info: HelloWorldController[0]
       /hello endpoint invoked by K8s9
 Activity.TraceId:            5bceb747cc7b79a77cfbde285f0f09cb
@@ -387,10 +390,9 @@ Resource associated with Activity:
     deployment.environment: otel-jen-tko-1b75
 
 ```
-
 {{% /tab %}}
 {{< /tabs >}}
 
-次に、別の terminal window で curl コマンドを使って trace を生成します。log を tail している console で trace id が表示されるはずです。`Activity.TraceId:`の値をコピーして、APM の Trace 検索フィールドに貼り付けてください。
+Then, in your other terminal window, generate a trace with your curl command. You will see the trace id in the console in which you are tailing the logs. Copy the `Activity.TraceId:` value and paste it into the Trace search field in APM.
 
 </details>
