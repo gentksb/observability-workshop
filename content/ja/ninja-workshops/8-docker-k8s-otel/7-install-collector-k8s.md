@@ -1,115 +1,109 @@
 ---
-title: K8sでOpenTelemetryコレクターをインストール
-linkTitle: 7. K8sでOpenTelemetryコレクターをインストール
+title: K8s への OpenTelemetry Collector のインストール
+linkTitle: 7. K8s への OpenTelemetry Collector のインストール
 weight: 7
 time: 15 minutes
 ---
 
-## ワークショップパート 1 の振り返り
+## ワークショップ Part 1 の振り返り
 
-ワークショップのこの時点で、以下を正常に完了しました：
+ワークショップのここまでで、以下を完了しました:
 
-- Linux ホストに Splunk distribution of OpenTelemetry コレクターをデプロイ
-- Splunk Observability Cloud にトレースとメトリクスを送信するよう設定
-- .NET アプリケーションをデプロイし、OpenTelemetry で計装
-- .NET アプリケーションを Docker 化し、o11y cloud にトレースが流れることを確認
+* Linux ホストに Splunk distribution of the OpenTelemetry Collector をデプロイしました
+* トレースとメトリクスを Splunk Observability Cloud に送信するように設定しました
+* .NET アプリケーションをデプロイし、OpenTelemetry で計装しました
+* .NET アプリケーションを Docker 化し、トレースが o11y cloud に送信されていることを確認しました
 
-上記のステップを**完了していない**場合は、ワークショップの残りの部分に進む前に以下のコマンドを実行してください：
+上記の手順を**まだ完了していない**場合は、ワークショップの残りの部分に進む前に、以下のコマンドを実行してください:
 
-```bash
+``` bash
 cp /home/splunk/workshop/docker-k8s-otel/docker/Dockerfile /home/splunk/workshop/docker-k8s-otel/helloworld/
 cp /home/splunk/workshop/docker-k8s-otel/docker/entrypoint.sh /home/splunk/workshop/docker-k8s-otel/helloworld/
-```
+````
 
-> **重要** これらのファイルがコピーされたら、`/home/splunk/workshop/docker-k8s-otel/helloworld/Dockerfile` を
-> エディターで開き、Dockerfile の `$INSTANCE` をあなたのインスタンス名に置き換えてください。
-> インスタンス名は `echo $INSTANCE` を実行することで確認できます。
+> **重要** これらのファイルをコピーしたら、エディタで `/home/splunk/workshop/docker-k8s-otel/helloworld/Dockerfile` を開き、
+> Dockerfile 内の `$INSTANCE` をインスタンス名に置き換えてください。
+> インスタンス名は `echo $INSTANCE` を実行して確認できます。
 
-## ワークショップパート 2 の紹介
+## ワークショップ Part 2 の紹介
 
-ワークショップの次の部分では、Kubernetes でアプリケーションを実行したいと思います。
-そのため、Kubernetes クラスターに Splunk distribution of OpenTelemetry コレクターを
+ワークショップの次のパートでは、アプリケーションを Kubernetes で実行したいので、
+Kubernetes クラスターに Splunk distribution of the OpenTelemetry Collector を
 デプロイする必要があります。
 
 まず、いくつかの重要な用語を定義しましょう。
 
 ### 重要な用語
 
-#### Kubernetes とは何ですか？
+#### Kubernetes とは？
 
-_「Kubernetes は、宣言的な設定と自動化の両方を促進する、コンテナ化されたワークロードとサービスを管理するためのポータブルで拡張可能なオープンソースプラットフォームです。」_
+_「Kubernetes は、コンテナ化されたワークロードやサービスを管理するための、
+ポータブルで拡張可能なオープンソースプラットフォームであり、宣言的な設定と自動化の両方を促進します。」_
 
-Source: <https://kubernetes.io/docs/concepts/overview/>
+出典:  https://kubernetes.io/docs/concepts/overview/
 
-Dockerfile に小さな修正を加えた後、アプリケーション用に以前ビルドした Docker イメージを
+Dockerfile に小さな変更を加えた後、先ほどアプリケーション用に作成した Docker イメージを
 Kubernetes クラスターにデプロイします。
 
-#### Helm とは何ですか？
+#### Helm とは？
 
-Helm は Kubernetes 用のパッケージマネージャーです。
+Helm は Kubernetes のパッケージマネージャーです。
 
-_「最も複雑な Kubernetes アプリケーションだとしても、定義、インストール、アップグレード役立ちます」_
+_「最も複雑な Kubernetes アプリケーションでも、定義、インストール、アップグレードを支援します。」_
 
-#### Helm を使用したコレクターのインストール
+出典:  https://helm.sh/
 
-プロダクト内ウィザードではなくコマンドラインを使用して、コレクターをインストールするための独自の
-`helm`コマンドを作成しましょう。
-
-まず、helm リポジトリを追加する必要があります：ます。」
-
-Source: <https://helm.sh/>
-
-Helm を使用して K8s クラスターに OpenTelemetry コレクターをデプロイします。
+Helm を使用して、K8s クラスターに OpenTelemetry collector をデプロイします。
 
 #### Helm の利点
 
-- 複雑性の管理
-  - 数十のマニフェストファイルではなく、単一の values.yaml ファイルを扱う
-- 簡単な更新
-  - インプレースアップグレード
-- ロールバックサポート
-  - helm rollback を使用してリリースの古いバージョンにロールバック
+* 複雑さの管理
+  * 数十のマニフェストファイルではなく、単一の values.yaml ファイルで対応
+* 簡単なアップデート
+  * インプレースアップグレード
+* ロールバックサポート
+  * helm rollback を使用するだけで、リリースの古いバージョンにロールバック可能
 
-## ホストコレクターのアンインストール
+## ホスト Collector のアンインストール
 
-先に進む前に、Linux ホストに先ほどインストールしたコレクターを削除しましょう：
-\
+先に進む前に、先ほど Linux ホストにインストールした collector を削除しましょう:
 
-```bash
+``` bash
 curl -sSL https://dl.signalfx.com/splunk-otel-collector.sh > /tmp/splunk-otel-collector.sh;
 sudo sh /tmp/splunk-otel-collector.sh --uninstall
 ```
 
-## Helm を利用して Collector をインストールする
+## Helm を使用した Collector のインストール
 
-ウィザードの代わりに、コマンドラインを利用して collector をインストールします。
+製品内ウィザードではなく、コマンドラインを使用して独自の
+`helm` コマンドを作成し、collector をインストールしましょう。
 
-まず初めに、Helm リポジトリに登録する必要があります
+まず、helm リポジトリを追加する必要があります:
 
-```bash
+``` bash
 helm repo add splunk-otel-collector-chart https://signalfx.github.io/splunk-otel-collector-chart
 ```
 
-リポジトリが最新であることを確認します：
+そして、リポジトリが最新であることを確認します:
 
-```bash
+``` bash
 helm repo update
 ```
 
-helm チャートのデプロイメントを設定するために、`/home/splunk`ディレクトリに`values.yaml`という名前の新しいファイルを作成しましょう：
+helm chart のデプロイを設定するために、
+`/home/splunk` ディレクトリに `values.yaml` という名前の新しいファイルを作成しましょう:
 
-```bash
-# swith to the /home/splunk dir
+``` bash
+# /home/splunk ディレクトリに移動
 cd /home/splunk
-# create a values.yaml file in vi
+# vi で values.yaml ファイルを作成
 vi values.yaml
 ```
+> 以下のテキストを貼り付ける前に、vi で 'i' を押して挿入モードに入ってください。
 
-> Press ‘i’ to enter into insert mode in vi before pasting the text below.　"i"を押下すると vi はインサートモードになります。ペースト前に押下してください
+次に、以下の内容を貼り付けます:
 
-そして、下記のコードをコピーしてください
-
-```yaml
+``` yaml
 logsEngine: otel
 agent:
   config:
@@ -124,13 +118,13 @@ agent:
             exclude_mount_points:
               match_type: regexp
               mount_points:
-                - /var/*
-                - /snap/*
-                - /boot/*
-                - /boot
-                - /opt/orbstack/*
-                - /mnt/machines/*
-                - /Users/*
+              - /var/*
+              - /snap/*
+              - /boot/*
+              - /boot
+              - /opt/orbstack/*
+              - /mnt/machines/*
+              - /Users/*
           load: null
           memory: null
           network: null
@@ -138,14 +132,14 @@ agent:
           processes: null
 ```
 
-> vi での変更を保存するには、`esc`キーを押してコマンドモードに入り、`:wq!`と入力してから`enter/return`キーを押します。
+> vi で変更を保存するには、`esc` キーを押してコマンドモードに入り、`:wq!` と入力してから `enter/return` キーを押します。
 
-次のコマンドを使用してコレクターをインストールできます：
+これで、以下のコマンドを使用して collector をインストールできます:
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
   helm install splunk-otel-collector --version {{< otel-version >}} \
   --set="splunkObservability.realm=$REALM" \
   --set="splunkObservability.accessToken=$ACCESS_TOKEN" \
@@ -161,7 +155,7 @@ agent:
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
+``` bash
 NAME: splunk-otel-collector
 LAST DEPLOYED: Fri Dec 20 01:01:43 2024
 NAMESPACE: default
@@ -175,32 +169,34 @@ Splunk OpenTelemetry Collector is installed and configured to send data to Splun
 {{% /tab %}}
 {{< /tabs >}}
 
-## コレクターが実行中であることを確認
+## Collector が実行中であることを確認する
 
-以下のコマンドでコレクターが実行されているかどうかを確認できます：
+以下のコマンドで collector が実行中かどうかを確認できます:
 
 {{< tabs >}}
 {{% tab title="Script" %}}
 
-```bash
+``` bash
 kubectl get pods
 ```
 
 {{% /tab %}}
 {{% tab title="Example Output" %}}
 
-```bash
+``` bash
 NAME                                                         READY   STATUS    RESTARTS   AGE
-splunk-otel-collector-agent-8xvk8                            1/1     Running   0          49s
-splunk-otel-collector-k8s-cluster-receiver-d54857c89-tx7qr   1/1     Running   0          49s
+splunk-otel-collector-agent-dkn88                            1/1     Running   0          53s
+splunk-otel-collector-agent-ksmh4                            1/1     Running   0          53s
+splunk-otel-collector-agent-lc2lf                            1/1     Running   0          53s
+splunk-otel-collector-k8s-cluster-receiver-dbf64995b-xgm9b   1/1     Running   0          53s
 ```
 
 {{% /tab %}}
 {{< /tabs >}}
 
-## O11y Cloud で K8s クラスターを確認
+## K8s クラスターが O11y Cloud に表示されていることを確認する
 
-Splunk Observability Cloud で、**Infrastructure** -> **Kubernetes** -> **Kubernetes Clusters**にナビゲートし、
-クラスター名（`$INSTANCE-cluster`）を検索します：
+Splunk Observability Cloud で、**Infrastructure** -> **Kubernetes** -> **Kubernetes Clusters** に移動し、
+クラスター名（`$INSTANCE-cluster`）を検索します:
 
 ![Kubernetes node](../images/k8snode.png)
