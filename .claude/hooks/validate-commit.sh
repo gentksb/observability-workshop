@@ -1,18 +1,13 @@
 #!/bin/bash
 # Prevent .claude directory files from being committed on translate/* branches
+#
+# Triggered by: PreToolUse hook with if="Bash(git commit *)"
+# Only runs when Claude executes git commit commands.
+#
+# Exit behavior (PreToolUse):
+#   - exit 0 with permissionDecision "deny": block the tool call
+#   - exit 0 with no stdout: allow the tool call
 set -e
-
-# Read hook input from stdin (JSON format from Claude Code)
-input=$(cat)
-
-# Extract the command being executed (without jq dependency)
-# Input format: {"tool_input": {"command": "..."}}
-command=$(echo "$input" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || echo "")
-
-# Only validate git commit commands
-if [[ ! "$command" =~ git[[:space:]]+commit ]]; then
-  exit 0
-fi
 
 # Check current branch
 current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
@@ -26,14 +21,18 @@ fi
 staged_claude_files=$(git diff --cached --name-only 2>/dev/null | grep '^\.claude/' || true)
 
 if [[ -n "$staged_claude_files" ]]; then
-  echo "ERROR: Cannot commit .claude directory files on translate/* branches." >&2
-  echo "Staged .claude files detected:" >&2
-  echo "$staged_claude_files" | sed 's/^/  - /' >&2
-  echo "" >&2
-  echo "The .claude directory should only be modified on the ja-translation-system branch." >&2
-  echo "Please unstage these files: git reset HEAD .claude/" >&2
-  # Exit code 2 blocks the tool call
-  exit 2
+  file_list=$(echo "$staged_claude_files" | sed 's/^/  - /')
+
+  cat <<EOF
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Cannot commit .claude directory files on translate/* branches.\nStaged .claude files detected:\n${file_list}\n\nThe .claude directory should only be modified on the ja-translation-system branch.\nPlease unstage these files: git reset HEAD .claude/"
+  }
+}
+EOF
+  exit 0
 fi
 
 exit 0
