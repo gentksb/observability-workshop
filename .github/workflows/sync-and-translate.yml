@@ -626,7 +626,7 @@ jobs:
           # Build PR body
           {
             printf '%s\n' \
-              "## Summary" \
+              "## Description" \
               "" \
               "Japanese translations for release ${NEW_TAG}." \
               "" \
@@ -635,7 +635,8 @@ jobs:
 
             # Add new workshops section if detected
             if [ "$HAS_NEW_WORKSHOPS" = "yes" ]; then
-              printf '\n%s\n' \
+              printf '%s\n' \
+                "" \
                 "## :warning: New Workshops Detected" \
                 "" \
                 "The following new workshops were detected and require careful review:" \
@@ -646,27 +647,38 @@ jobs:
                   printf '%s\n' "- \`${workshop}\` (**${WORKSHOP_NAME}**)"
                 fi
               done
-              printf '\n%s\n' \
+              printf '%s\n' \
+                "" \
                 "> This PR was created as a **draft** because new workshops were detected." \
                 "> Please review the new workshop translations carefully before marking as ready."
             fi
 
-            printf '\n%s\n' \
+            printf '%s\n' \
               "" \
               "This PR adds Japanese translations for the workshop content." \
               "" \
-              "## Review Checklist" \
+              "### Type of change" \
               "" \
-              "- [ ] Markdown renders correctly" \
-              "- [ ] All links work" \
-              "- [ ] Code blocks unchanged" \
-              "- [ ] Terminology is consistent" \
+              "none" \
+              ""
+
+            if [ "$HAS_NEW_WORKSHOPS" = "yes" ]; then
+              printf '%s\n' \
+                "## How Has This Been Tested?" \
+                "" \
+                "- [ ] Run \`hugo serve\` locally and verify Japanese pages render correctly" \
+                "- [ ] Check that images are displayed" \
+                "- [ ] Verify navigation works" \
+                ""
+            fi
+
+            printf '%s\n' \
+              "## Checklist" \
               "" \
-              "## Test Plan" \
-              "" \
-              "- [ ] Run \`hugo serve\` locally and verify Japanese pages render correctly" \
-              "- [ ] Check that images are displayed" \
-              "- [ ] Verify navigation works" \
+              "- [x] My code follows the style guidelines of this project" \
+              "- [ ] I have performed a self-review of my own code" \
+              "- [x] My changes generate no new warnings" \
+              "- [x] Markdown Lint passes locally with my changes" \
               "" \
               "---" \
               "Generated with [Claude Code](https://claude.ai/claude-code) via automated translation workflow."
