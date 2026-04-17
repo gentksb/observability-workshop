@@ -91,7 +91,7 @@ WorkshopはHugoの `draft: true` で開発を開始し、リリース時に削�
 
 ## 翻訳
 
-- **翻訳モデル**: Claude Opus 4.5 (via AWS Bedrock)
+- **翻訳モデル**: Claude Opus 4.6 (via AWS Bedrock)
 - **翻訳スキル**: `.claude/skills/splunk-workshop-ja-translator/`
 - **翻訳対象**: `content/en/**/*.md` → `content/ja/**/*.md`（関連する `img/` も含む）
 
