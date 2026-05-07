@@ -399,12 +399,15 @@ jobs:
 
             while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$TRANSLATE_SUCCESS" = "false" ]; do
               RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "Translation attempt ${RETRY_COUNT}/${MAX_RETRIES} for ${EN_FILE}..."
+              # Escalate max-turns on each retry to give large/complex files more room.
+              # 1st: 10 turns, 2nd: 20 turns, 3rd: 30 turns
+              local CURRENT_MAX_TURNS=$((10 * RETRY_COUNT))
+              echo "Translation attempt ${RETRY_COUNT}/${MAX_RETRIES} (max-turns=${CURRENT_MAX_TURNS}) for ${EN_FILE}..."
 
               if timeout "${FILE_TIMEOUT}" claude --print \
-                "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
+                "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
                 --allowedTools "Edit,Read,Write" \
-                --max-turns 10 \
+                --max-turns "${CURRENT_MAX_TURNS}" \
                 2>&1; then
                 TRANSLATE_SUCCESS=true
                 echo "Successfully translated: ${EN_FILE}"
@@ -517,11 +520,11 @@ jobs:
             # Re-copy English source to ensure clean state
             cp "$EN_FILE" "$JA_FILE"
 
-            # Retry translation (1 attempt)
+            # Retry translation (1 attempt) - use the most generous turn budget for the rescue path
             if timeout "${FILE_TIMEOUT}" claude --print \
-              "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
+              "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
               --allowedTools "Edit,Read,Write" \
-              --max-turns 10 \
+              --max-turns 30 \
               2>&1; then
               echo "Re-translation completed: ${EN_FILE}"
             else
