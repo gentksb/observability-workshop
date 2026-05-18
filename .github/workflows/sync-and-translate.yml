@@ -108,7 +108,6 @@ jobs:
     permissions:
       id-token: write
       contents: write
-      workflows: write
     outputs:
       translation_branch: ${{ steps.translate-branch.outputs.branch_name }}
       translated_count: ${{ steps.translate.outputs.translated_count }}
