@@ -60,6 +60,28 @@ upstream `splunk/observability-workshop` の v6.69 で `.github/workflows/deploy
 | 将来 `pull_request` トリガーが追加されると secret 露出経路が開く | `.github/workflows/CLAUDE.md` に追加禁止を明記 / CODEOWNERS で workflow 変更を統制 |
 | Claude Code 翻訳ジョブが誤って `.github/workflows/` を編集する | `--allowedTools "Edit,Read,Write"` で制限済み / `git add content/ja/` のみコミット（line 572） |
 
+## ブランチ保護の構成
+
+### `main` ブランチ
+
+upstream の完全コピーで `git reset --hard` + force push される運用専用ブランチ。**ブランチ保護なし**。`FORK_SYNC_PAT` を使った Actions runner からの force push を許容する設計。人間がここに直接コミットすることは想定しない。
+
+### `ja-translation-system` ブランチ
+
+翻訳システムの設定とコードを保持。**ruleset で保護**:
+
+- ruleset 名: `ja-translation-system PR required`
+- ルール: `pull_request`（approving review 1、Code Owner レビュー必須）
+- bypass actors: `RepositoryRole` actor_id 5（admin）
+
+bypass actor に admin role を含めるのは、`Update last translated tag` ジョブが `.last-translated-tag` を直接 push する必要があるため。`FORK_SYNC_PAT` のオーナー（gentksb）が repository admin であれば、PAT 経由の push が ruleset を bypass できる。
+
+人間が `.github/workflows/`、`.github/CODEOWNERS`、`.claude/` を変更する場合は通常通り PR + Code Owner レビューが必須。
+
+### `translate/*` ブランチ
+
+upstream への PR 用ブランチ。保護なし。`.claude/` への commit は pre-commit hook（`.claude/hooks/validate-commit.sh`）で拒否される。
+
 ## 設定変更時のチェックリスト
 
 `.github/workflows/` 配下を変更する PR をレビューする際は、以下を確認してください。

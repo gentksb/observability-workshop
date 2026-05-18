@@ -761,6 +761,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           ref: ${{ github.ref }}
+          # ja-translation-system has a ruleset that requires PR review.
+          # FORK_SYNC_PAT (admin role) bypasses the ruleset to push tag updates directly.
+          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Update last translated tag file
         run: |
