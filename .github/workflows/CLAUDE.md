@@ -19,6 +19,9 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 | --------- | ---- | --------- |
 | `force_translate` | 新しいタグがなくても翻訳を実行 | false |
 | `translate_all_untranslated` | すべての未翻訳コンテンツも翻訳 | false |
+| `cleanup_only` | sync/translate/PR作成をスキップし、cleanup ジョブだけを実行 | false |
+| `cleanup_dry_run` | cleanup の対象一覧を出力するだけで close/delete を実行しない | false |
+| `cleanup_max_prs` | 1回の実行で処理する陳腐化PRの上限（安全装置） | 10 |
 
 ### 処理フロー
 
@@ -27,8 +30,35 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 3. **新ワークショップ検出**: 翻訳対象ファイルから新しいワークショップディレクトリを検出
 4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳
 5. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップがある場合はドラフトPR）
-6. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
-7. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
+6. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
+7. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
+8. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
+9. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
+
+### 陳腐化 PR / fork ブランチの自動整理
+
+upstream のマージが翻訳PR生成より遅いと、古い未マージ翻訳PRが滞留する。これを `cleanup-stale-prs` / `cleanup-fork-branches` ジョブで毎回整理する。
+
+**`cleanup-stale-prs`**:
+
+- upstream の open な `translate/*` PR を fork 所有者で絞り込み
+- 新しく作成した PR の番号より小さいものを対象とし、`gh pr view --json commits,reviews` で人手コミット・非PENDINGレビューがあるものは skip
+- skip しなかった対象に「Superseded by #N (translation for vX.Y). Closing this PR.」コメントを残してクローズ
+- `cleanup_max_prs` 件まで処理。`cleanup_dry_run=true` の場合は対象一覧の echo だけ実行
+- `cleanup_only=true` で dispatch すると、新PR作成をスキップして cleanup のみを実行（`needs.create-pr.outputs.pr_number` が空の場合は最新マージ済み翻訳PRを参照値として使用）
+
+**`cleanup-fork-branches`**:
+
+- `git ls-remote --heads origin 'translate/v*'` で fork のブランチ一覧を取得
+- 各ブランチの upstream 側 PR 状態を確認し、`MERGED` / `CLOSED` / `NONE` のものを `git push origin --delete` で削除
+- 現在進行中の `translate/{NEW_TAG}` は除外
+- `cleanup_dry_run=true` の場合は `[DRY-RUN] would delete ...` を echo するだけ
+
+**安全装置**:
+
+- `cleanup_max_prs` (default 10) で1回の実行件数を制限し、初回事故時の被害を局所化
+- 各操作は `|| true` でループ続行。失敗しても次回実行で再試行可能
+- `concurrency: sync-and-translate` グループで並走防止
 
 ### 新ワークショップ検出とドラフトPR
 
@@ -63,6 +93,10 @@ WorkshopはHugoの `draft: true` で開発を開始し、リリース時に削�
 | `translatedMarkdownFileCount` | string | 翻訳成功ファイル数 |
 | `failedFileCount` | string | 翻訳失敗ファイル数 |
 | `pullRequestNumber` | string | 作成されたPR番号 |
+| `staleClosedCount` | string | cleanup でクローズした陳腐化PR数 |
+| `staleSkippedCount` | string | レビュー痕跡があり手動対応が必要な陳腐化PR数 |
+| `staleSkippedPrs` | string | 手動対応が必要なPR番号一覧（例: `#511 #512`） |
+| `forkBranchesDeleted` | string | fork から削除した translate/v* ブランチ数 |
 
 **`reason` フィールドの値**:
 

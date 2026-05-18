@@ -16,6 +16,21 @@ on:
         required: false
         type: boolean
         default: false
+      cleanup_only:
+        description: 'Skip sync/translate/PR creation; run cleanup against current upstream state'
+        required: false
+        type: boolean
+        default: false
+      cleanup_dry_run:
+        description: 'Cleanup mode: list targets without closing/deleting'
+        required: false
+        type: boolean
+        default: false
+      cleanup_max_prs:
+        description: 'Max stale PRs to process per run (safety cap)'
+        required: false
+        type: number
+        default: 10
 
 concurrency:
   group: sync-and-translate
@@ -102,7 +117,7 @@ jobs:
   sync-and-translate:
     name: Sync main and translate
     needs: check-new-release
-    if: needs.check-new-release.outputs.has_new_release == 'true'
+    if: inputs.cleanup_only != true && needs.check-new-release.outputs.has_new_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -606,7 +621,7 @@ jobs:
   create-pr:
     name: Create PR for review
     needs: [check-new-release, sync-and-translate]
-    if: needs.sync-and-translate.outputs.translation_branch != ''
+    if: inputs.cleanup_only != true && needs.sync-and-translate.outputs.translation_branch != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -749,10 +764,179 @@ jobs:
           fi
           echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
 
+  cleanup-stale-prs:
+    name: Close superseded translation PRs
+    needs: [check-new-release, sync-and-translate, create-pr]
+    if: |
+      always()
+      && (inputs.cleanup_only == true || needs.create-pr.outputs.pr_number != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      closed_count: ${{ steps.close.outputs.closed_count }}
+      skipped_count: ${{ steps.close.outputs.skipped_count }}
+      skipped_prs: ${{ steps.close.outputs.skipped_prs }}
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_PAT }}
+      FORK_OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: Close superseded PRs on upstream
+        id: close
+        env:
+          NEW_PR_INPUT: ${{ needs.create-pr.outputs.pr_number }}
+          NEW_BRANCH_INPUT: ${{ needs.sync-and-translate.outputs.translation_branch }}
+          NEW_TAG_INPUT: ${{ needs.check-new-release.outputs.new_tag }}
+          DRY_RUN: ${{ inputs.cleanup_dry_run }}
+          MAX_PRS: ${{ inputs.cleanup_max_prs }}
+        run: |
+          set -euo pipefail
+
+          NEW_PR="${NEW_PR_INPUT}"
+          NEW_BRANCH="${NEW_BRANCH_INPUT}"
+          NEW_TAG="${NEW_TAG_INPUT}"
+          DRY_RUN="${DRY_RUN:-false}"
+          MAX="${MAX_PRS:-10}"
+
+          # cleanup_only モード時は最新マージ済み翻訳PRから値を補完
+          if [ -z "$NEW_PR" ]; then
+            LATEST=$(gh pr list --repo "${UPSTREAM_REPO}" \
+              --search "is:pr is:merged author:${FORK_OWNER} translate" \
+              --json number,headRefName,title --limit 1 --jq '.[0] // empty')
+            if [ -n "$LATEST" ]; then
+              NEW_PR=$(jq -r '.number // ""' <<<"$LATEST")
+              NEW_BRANCH=$(jq -r '.headRefName // ""' <<<"$LATEST")
+              NEW_TAG=$(jq -r '.title // ""' <<<"$LATEST" | sed 's/^Japanese Translation: //')
+            fi
+          fi
+
+          if [ -z "$NEW_PR" ]; then
+            echo "No reference PR found, skipping cleanup"
+            echo "closed_count=0" >> $GITHUB_OUTPUT
+            echo "skipped_count=0" >> $GITHUB_OUTPUT
+            echo "skipped_prs=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Reference PR: #${NEW_PR} (head=${NEW_BRANCH}, tag=${NEW_TAG})"
+          echo "DRY_RUN=${DRY_RUN}, MAX=${MAX}"
+
+          gh pr list --repo "${UPSTREAM_REPO}" \
+            --search "is:open is:pr author:${FORK_OWNER}" \
+            --json number,headRefName,headRepositoryOwner --limit 50 \
+            | jq -c '.[] | select(.headRefName | startswith("translate/"))' > /tmp/prs.json || true
+
+          CLOSED=0
+          SKIPPED=0
+          SKIPPED_LIST=""
+
+          while IFS= read -r pr; do
+            [ -z "$pr" ] && continue
+            N=$(jq -r .number <<<"$pr")
+            HEAD=$(jq -r .headRefName <<<"$pr")
+            OWNER=$(jq -r '.headRepositoryOwner.login // ""' <<<"$pr")
+
+            [ "$OWNER" = "$FORK_OWNER" ] || continue
+            [ "$N" -ge "$NEW_PR" ] && continue
+            [ "$HEAD" = "$NEW_BRANCH" ] && continue
+            [ "$CLOSED" -ge "$MAX" ] && { echo "Reached MAX=$MAX, stopping"; break; }
+
+            DETAIL=$(gh pr view "$N" --repo "${UPSTREAM_REPO}" --json commits,reviews)
+            HUMAN=$(jq --arg fo "$FORK_OWNER" \
+              '[.commits[] | select((.authors // []) | map(.login) | any(. != "github-actions[bot]" and . != $fo))] | length' \
+              <<<"$DETAIL")
+            REVIEWS=$(jq '[.reviews[] | select(.state != "PENDING")] | length' <<<"$DETAIL")
+
+            if [ "$HUMAN" -gt 0 ] || [ "$REVIEWS" -gt 0 ]; then
+              echo "SKIP PR #$N (human_commits=$HUMAN, reviews=$REVIEWS)"
+              SKIPPED=$((SKIPPED + 1))
+              SKIPPED_LIST="${SKIPPED_LIST} #${N}"
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY-RUN] would close PR #$N (head=$HEAD)"
+            else
+              gh pr comment "$N" --repo "${UPSTREAM_REPO}" \
+                --body "Superseded by #${NEW_PR} (translation for ${NEW_TAG}). Closing this PR." || true
+              gh pr close "$N" --repo "${UPSTREAM_REPO}" || true
+              echo "Closed PR #$N"
+            fi
+            CLOSED=$((CLOSED + 1))
+          done < /tmp/prs.json
+
+          echo "closed_count=${CLOSED}" >> $GITHUB_OUTPUT
+          echo "skipped_count=${SKIPPED}" >> $GITHUB_OUTPUT
+          echo "skipped_prs=${SKIPPED_LIST# }" >> $GITHUB_OUTPUT
+
+          echo "Summary: closed=${CLOSED}, skipped=${SKIPPED}, skipped_prs='${SKIPPED_LIST# }'"
+
+  cleanup-fork-branches:
+    name: Delete merged/closed translate branches on fork
+    needs: [check-new-release, sync-and-translate, create-pr, cleanup-stale-prs]
+    if: |
+      always()
+      && (inputs.cleanup_only == true || needs.create-pr.outputs.pr_number != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      deleted_count: ${{ steps.delete.outputs.deleted_count }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FORK_OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: Checkout (for git push)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
+      - name: Delete fork translate branches with no open PR
+        id: delete
+        env:
+          CURRENT_BRANCH: ${{ needs.sync-and-translate.outputs.translation_branch }}
+          DRY_RUN: ${{ inputs.cleanup_dry_run }}
+        run: |
+          set -euo pipefail
+
+          DRY_RUN="${DRY_RUN:-false}"
+          DELETED=0
+
+          git ls-remote --heads origin 'translate/v*' \
+            | awk '{print $2}' | sed 's|refs/heads/||' > /tmp/branches.txt || true
+
+          while IFS= read -r BR; do
+            [ -z "$BR" ] && continue
+            [ "$BR" = "$CURRENT_BRANCH" ] && { echo "KEEP $BR (current run)"; continue; }
+
+            STATE=$(gh pr list --repo "${UPSTREAM_REPO}" \
+              --head "${FORK_OWNER}:${BR}" --state all \
+              --json state --jq '.[0].state // "NONE"')
+
+            case "$STATE" in
+              OPEN)
+                echo "KEEP $BR (open PR exists)"
+                ;;
+              MERGED|CLOSED|NONE)
+                if [ "$DRY_RUN" = "true" ]; then
+                  echo "[DRY-RUN] would delete $BR (PR=$STATE)"
+                else
+                  git push origin --delete "$BR" || true
+                  echo "Deleted $BR (PR=$STATE)"
+                fi
+                DELETED=$((DELETED + 1))
+                ;;
+            esac
+          done < /tmp/branches.txt
+
+          echo "deleted_count=${DELETED}" >> $GITHUB_OUTPUT
+          echo "Summary: deleted=${DELETED}"
+
   update-tag-tracking:
     name: Update last translated tag
-    needs: [check-new-release, create-pr]
-    if: needs.create-pr.result == 'success'
+    needs: [check-new-release, create-pr, cleanup-stale-prs]
+    if: always() && needs.create-pr.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -779,7 +963,7 @@ jobs:
 
   notify-slack:
     name: Notify Slack
-    needs: [check-new-release, sync-and-translate, create-pr]
+    needs: [check-new-release, sync-and-translate, create-pr, cleanup-stale-prs, cleanup-fork-branches]
     if: >-
       always()
       && needs.check-new-release.result == 'success'
@@ -820,12 +1004,20 @@ jobs:
           TRANSLATED_COUNT="${{ needs.sync-and-translate.outputs.translated_count }}"
           FAILED_COUNT="${{ needs.sync-and-translate.outputs.failed_count }}"
           PR_NUMBER="${{ needs.create-pr.outputs.pr_number }}"
+          STALE_CLOSED="${{ needs.cleanup-stale-prs.outputs.closed_count }}"
+          STALE_SKIPPED="${{ needs.cleanup-stale-prs.outputs.skipped_count }}"
+          STALE_SKIPPED_PRS="${{ needs.cleanup-stale-prs.outputs.skipped_prs }}"
+          BRANCHES_DELETED="${{ needs.cleanup-fork-branches.outputs.deleted_count }}"
           JSON_PAYLOAD=$(cat <<EOF
           {
             "hasNewWorkshopTranslation": "${HAS_NEW_WORKSHOP}",
             "translatedMarkdownFileCount": "${TRANSLATED_COUNT:-0}",
             "failedFileCount": "${FAILED_COUNT:-0}",
             "pullRequestNumber": "${PR_NUMBER:-}",
+            "staleClosedCount": "${STALE_CLOSED:-0}",
+            "staleSkippedCount": "${STALE_SKIPPED:-0}",
+            "staleSkippedPrs": "${STALE_SKIPPED_PRS:-}",
+            "forkBranchesDeleted": "${BRANCHES_DELETED:-0}",
             "status": "${{ steps.status.outputs.result }}",
             "reason": "${{ steps.reason.outputs.result }}"
           }
