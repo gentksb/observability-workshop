@@ -910,15 +910,17 @@ jobs:
             [ -z "$BR" ] && continue
             [ "$BR" = "$CURRENT_BRANCH" ] && { echo "KEEP $BR (current run)"; continue; }
 
+            # gh pr list --head "owner:branch" は public fork PR で空配列を返す既知の挙動があるため
+            # search 構文を使う（is:pr head:BR author:OWNER）
             STATE=$(gh pr list --repo "${UPSTREAM_REPO}" \
-              --head "${FORK_OWNER}:${BR}" --state all \
+              --search "is:pr head:${BR} author:${FORK_OWNER}" --state all \
               --json state --jq '.[0].state // "NONE"')
 
             case "$STATE" in
               OPEN)
                 echo "KEEP $BR (open PR exists)"
                 ;;
-              MERGED|CLOSED|NONE)
+              MERGED|CLOSED)
                 if [ "$DRY_RUN" = "true" ]; then
                   echo "[DRY-RUN] would delete $BR (PR=$STATE)"
                 else
@@ -926,6 +928,10 @@ jobs:
                   echo "Deleted $BR (PR=$STATE)"
                 fi
                 DELETED=$((DELETED + 1))
+                ;;
+              NONE)
+                # PR が見つからないブランチは安全側に倒して保持。手動で確認すべき
+                echo "KEEP $BR (no PR found, manual review required)"
                 ;;
             esac
           done < /tmp/branches.txt
