@@ -128,6 +128,11 @@ jobs:
 
       - name: Sync main with upstream
         id: sync
+        env:
+          # GITHUB_TOKEN cannot push changes to .github/workflows/* files.
+          # FORK_SYNC_PAT is a fine-grained PAT scoped to this fork only,
+          # with Contents: write + Workflows: write. See .github/SECURITY-NOTES.md.
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -137,7 +142,8 @@ jobs:
           # Reset main to upstream tag
           git reset --hard "${NEW_TAG}"
 
-          # Push synced main
+          # Push synced main using FORK_SYNC_PAT (required to update workflow files)
+          gh auth setup-git
           git push origin main --force
 
       - name: Detect files to translate

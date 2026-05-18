@@ -79,7 +79,9 @@ WorkshopはHugoの `draft: true` で開発を開始し、リリース時に削�
 | シークレット | 用途 |
 | ---------- | ---- |
 | `AWS_ROLE_ARN` | AWS BedrockへのOIDCアクセス用IAMロールARN |
+| `FORK_SYNC_PAT` | fork main を upstream タグに同期する push 用 PAT。`GITHUB_TOKEN` は `.github/workflows/` を含む push を拒否するため必要（`Contents: Read and write` + `Workflows: Read and write` を fork リポジトリのみに付与） |
 | `UPSTREAM_PAT` | upstreamリポジトリへのPR作成用PAT（`Pull requests: Read and write` 権限が必要） |
+| `SLACK_WEBHOOK_URL` | 実行結果通知用 Slack Webhook URL |
 
 ### 必要な権限
 
@@ -124,6 +126,11 @@ git push origin main --force
 ### 3. シークレットの設定
 
 - `AWS_ROLE_ARN`: AWS BedrockへのOIDCアクセス用IAMロールARN
+- `FORK_SYNC_PAT`: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens
+  - Resource owner: fork 所有者（例: `gentksb`）
+  - Repository access: `gentksb/observability-workshop` のみ
+  - Permissions: `Contents: Read and write`、`Workflows: Read and write`
+  - 有効期限: 90日（Splunk enterprise要件）
 - `UPSTREAM_PAT`: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens
   - Resource owner: `splunk`
   - Repository access: `splunk/observability-workshop`
@@ -140,3 +147,27 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 | 翻訳が実行されない | upstreamに新しいタグがあるか確認。手動実行で `force_translate` を有効化。`.last-translated-tag` の内容を確認 |
 | 翻訳が失敗する | AWS認証情報の設定を確認。Claude Code CLIのバージョンを確認。ログでエラーメッセージを特定 |
 | upstream へのPR作成失敗 | `UPSTREAM_PAT` の設定・有効期限・権限を確認 |
+| `refusing to allow ... without workflows permission` エラー | `FORK_SYNC_PAT` 未設定または `Workflows: Read and write` 権限不足。GitHub の Fine-grained PAT を再発行し fork リポジトリのみに `Contents` + `Workflows` の write を付与 |
+
+## セキュリティ設計
+
+このワークフローはfork内のmainブランチへのforce pushと、upstreamへのPR作成という強い権限を扱います。設計上の前提は `.github/SECURITY-NOTES.md` に詳細を記載しています。設定変更時は以下を遵守してください。
+
+### 禁止事項
+
+- **`pull_request` / `pull_request_target` トリガーの追加禁止**: PR経由で渡されたコードが secrets にアクセスできる経路が開きます。fork からの PR では GitHub が secrets を渡さない仕様で守られていますが、トリガーを追加すると同一リポジトリ内 PR からの攻撃面が広がります。
+- **secret の使用箇所拡大の禁止**: `FORK_SYNC_PAT` は `Sync main with upstream` ステップのみ、`UPSTREAM_PAT` は `create-pr` ジョブのみ。他のステップから参照しないでください。
+- **`permissions:` の broad 化禁止**: ジョブ単位で必要最小限のキーのみ指定。グローバル `permissions: {}` は維持してください。
+
+### レビュー必須化
+
+`.github/workflows/`、`.github/CODEOWNERS`、`.claude/` への変更は CODEOWNERS により @gentksb のレビューが必須です。`main` および `ja-translation-system` ブランチのブランチ保護で「Require review from Code Owners」を有効化してください。
+
+### PAT ローテーション
+
+`FORK_SYNC_PAT` および `UPSTREAM_PAT` は90日ごとに更新してください（Splunk enterprise要件）。手順は `.github/SECURITY-NOTES.md` を参照。
+
+### 根拠
+
+- [Security hardening for GitHub Actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions)
+- [Permissions required for fine-grained PATs](https://docs.github.com/en/rest/overview/permissions-required-for-fine-grained-personal-access-tokens)

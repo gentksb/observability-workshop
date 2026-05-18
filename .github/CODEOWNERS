@@ -1,0 +1,10 @@
+# CODEOWNERS for fork-side review enforcement
+#
+# Workflow definitions and Claude Code configuration can grant access to
+# secrets (FORK_SYNC_PAT, UPSTREAM_PAT, AWS OIDC, SLACK_WEBHOOK_URL).
+# Any change to these paths must be reviewed by @gentksb before merge.
+# See .github/SECURITY-NOTES.md for the threat model.
+
+.github/workflows/  @gentksb
+.github/CODEOWNERS  @gentksb
+.claude/            @gentksb
