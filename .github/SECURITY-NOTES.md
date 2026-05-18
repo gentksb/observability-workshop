@@ -70,7 +70,7 @@ upstream の完全コピーで `git reset --hard` + force push される運用�
 
 翻訳システムの設定とコードを保持。**ruleset で保護**:
 
-- ruleset 名: `ja-translation-system PR required`
+- ruleset 名: `ja-translation-system PR required`（id: `16540999`）
 - ルール: `pull_request`（approving review 1、Code Owner レビュー必須）
 - bypass actors: `RepositoryRole` actor_id 5（admin）
 
@@ -91,6 +91,33 @@ upstream への PR 用ブランチ。保護なし。`.claude/` への commit は
 - [ ] `UPSTREAM_PAT` が `create-pr` ジョブ以外から参照されていないか
 - [ ] `permissions:` ブロックが最小権限になっているか（ジョブ単位での絞り込み）
 - [ ] 新しい secret を追加する場合、CODEOWNERS で参照箇所がレビュー対象になっているか
+
+## ハマりやすい仕様の癖（実装時の参考）
+
+ワークフロー編集時に踏みやすい GitHub Actions の仕様をまとめます。
+
+### `actions/checkout` の credential が他の認証より優先される
+
+`actions/checkout` は `http.extraheader` に渡された token を設定します。後から `gh auth setup-git` を呼んでも extraheader 側が優先されるため、push が GitHub App として実行されてしまい `workflows permission` エラーになります。
+
+**対処**: PAT を使いたいステップでは `actions/checkout` の `token:` 入力に PAT を直接渡す（`sync-and-translate.yml` の `Sync main with upstream` と `Update last translated tag` ジョブで採用）。
+
+### ruleset と従来型 branch protection の bypass actor
+
+旧式の branch protection rule は bypass actor の概念を持ちません。bypass を使う場合は **ruleset に移行する必要があります**。ruleset の bypass actor は `User` / `Team` / `RepositoryRole` / `DeployKey` のいずれかで、PAT 自体は登録できません。PAT のオーナー（user）または admin role を bypass actor に登録し、PAT 経由で借用する形になります。
+
+### ruleset 操作コマンドのメモ
+
+```bash
+# ruleset 一覧取得
+gh api repos/gentksb/observability-workshop/rulesets
+
+# ruleset の詳細
+gh api repos/gentksb/observability-workshop/rulesets/16540999
+
+# 従来型保護の削除（ruleset に移行する際に旧保護を撤去）
+gh api -X DELETE repos/gentksb/observability-workshop/branches/{branch}/protection
+```
 
 ## PAT ローテーション手順
 
