@@ -120,6 +120,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # GITHUB_TOKEN cannot push changes to .github/workflows/* files.
+          # Use FORK_SYNC_PAT (Contents + Workflows write, fork-only) so the
+          # subsequent `git push origin main --force` is authenticated as a PAT.
+          # See .github/SECURITY-NOTES.md.
+          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Setup upstream remote
         run: |
@@ -128,11 +133,6 @@ jobs:
 
       - name: Sync main with upstream
         id: sync
-        env:
-          # GITHUB_TOKEN cannot push changes to .github/workflows/* files.
-          # FORK_SYNC_PAT is a fine-grained PAT scoped to this fork only,
-          # with Contents: write + Workflows: write. See .github/SECURITY-NOTES.md.
-          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -142,8 +142,7 @@ jobs:
           # Reset main to upstream tag
           git reset --hard "${NEW_TAG}"
 
-          # Push synced main using FORK_SYNC_PAT (required to update workflow files)
-          gh auth setup-git
+          # Push synced main (credential set by actions/checkout with FORK_SYNC_PAT)
           git push origin main --force
 
       - name: Detect files to translate
