@@ -108,7 +108,6 @@ jobs:
     permissions:
       id-token: write
       contents: write
-      workflows: write
     outputs:
       translation_branch: ${{ steps.translate-branch.outputs.branch_name }}
       translated_count: ${{ steps.translate.outputs.translated_count }}
@@ -135,8 +134,16 @@ jobs:
 
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
 
+          # Save current HEAD before reset to restore .github/ afterwards.
+          # GITHUB_TOKEN cannot push workflow file changes (no grantable 'workflows' scope),
+          # so we keep the fork's existing .github/ unchanged.
+          PREV_HEAD=$(git rev-parse HEAD)
+
           # Reset main to upstream tag
           git reset --hard "${NEW_TAG}"
+
+          # Restore .github/ from pre-reset state so no workflow file diff is pushed
+          git checkout "${PREV_HEAD}" -- .github/
 
           # Push synced main
           git push origin main --force
