@@ -366,7 +366,7 @@ jobs:
       - name: Translate files
         id: translate
         if: steps.detect.outputs.has_files == 'true'
-        timeout-minutes: 60
+        timeout-minutes: 120
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
         run: |
