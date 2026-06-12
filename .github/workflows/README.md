@@ -62,7 +62,7 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 
 翻訳は[Claude Code CLI](https://github.com/anthropics/claude-code)とAWS Bedrockを使用して自動的に行われます。
 
-- **翻訳モデル**: Claude Opus 4.5 (via AWS Bedrock)
+- **翻訳モデル**: Claude Opus 4.6 (via AWS Bedrock)
 - **翻訳スキル**: `.claude/skills/splunk-workshop-ja-translator/`
 - **翻訳ガイドライン**: [translation-guide.md](../../.claude/skills/splunk-workshop-ja-translator/references/translation-guide.md)
 
@@ -127,6 +127,8 @@ git push origin main --force
 
 GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイダーとIAMロールを設定します。
 
+認証はAWS SDKの `credential_process` を使った都度更新方式です。Bedrock呼び出しのたびにGitHub OIDCトークンを再発行して `AssumeRoleWithWebIdentity` を実行するため、IAMロールの `MaxSessionDuration` を延長しなくても長時間の翻訳ジョブを実行できます。詳細は [CLAUDE.md](./CLAUDE.md) の「AWS認証」を参照してください。
+
 ## トラブルシューティング
 
 ### 翻訳が実行されない
@@ -140,6 +142,11 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 - AWS認証情報が正しく設定されているか確認
 - Claude Code CLIが最新バージョンか確認
 - ログを確認し、エラーメッセージを特定
+
+### 翻訳ジョブが途中で失敗・タイムアウトした
+
+- 同じタグでワークフローを再実行する
+- 翻訳済みファイルはリモートの `translate/{tag}` ブランチから復元・スキップされ、未翻訳分のみが翻訳される（レジューム）
 
 ### upstream へのPRが作成できない
 
