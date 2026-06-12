@@ -28,7 +28,7 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 1. **新リリースチェック**: upstreamの最新タグを取得し、`.last-translated-tag` と比較
 2. **mainブランチ同期**: 新しいタグがあれば、mainをupstreamのタグにリセット
 3. **新ワークショップ検出**: 翻訳対象ファイルから新しいワークショップディレクトリを検出
-4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳
+4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳。前回実行が途中で失敗していた場合は、リモートの `translate/{tag}` ブランチから翻訳済みファイルを復元し、未翻訳分のみを翻訳して再開する（レジューム）
 5. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップがある場合はドラフトPR）
 6. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
 7. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
@@ -59,6 +59,29 @@ upstream のマージが翻訳PR生成より遅いと、古い未マージ翻訳
 - `cleanup_max_prs` (default 10) で1回の実行件数を制限し、初回事故時の被害を局所化
 - 各操作は `|| true` でループ続行。失敗しても次回実行で再試行可能
 - `concurrency: sync-and-translate` グループで並走防止
+
+### AWS認証（OIDC + credential_process）
+
+Bedrockへの認証は `aws-actions/configure-aws-credentials` ではなく、AWS SDK の `credential_process` を使った都度更新方式を採用しています。
+
+**背景**: `configure-aws-credentials` はジョブ冒頭に一度だけ一時クレデンシャルを取得して環境変数に固定するため、翻訳対象が多くジョブがIAMロールの `MaxSessionDuration`（組織ポリシーで延長不可）を超えるとクレデンシャルが失効し、ジョブが失敗していました。
+
+**仕組み**:
+
+1. `Configure refreshable AWS credentials` ステップが `~/.aws/oidc-credential-process.sh` と `~/.aws/config`（default プロファイルに `credential_process` を設定）を生成
+2. claude プロセス（AWS SDK）がクレデンシャルを必要とするたびにスクリプトが実行され、GitHub OIDC トークンの再発行 → `AssumeRoleWithWebIdentity` を実行
+3. 取得したクレデンシャルは `$RUNNER_TEMP` にキャッシュされ、失効5分前を切ると自動的に再取得
+
+GitHub OIDC トークンは `id-token: write` 権限があればジョブ実行中いつでも再発行できるため、ジョブ全体の実行時間はセッション上限に縛られません（上限はジョブの `timeout-minutes: 300` のみ）。
+
+### 翻訳のレジューム（途中再開）
+
+翻訳ジョブが途中で失敗・タイムアウトした場合でも、`Push translation branch` まで到達していれば翻訳結果はリモートの `translate/{tag}` ブランチに残ります。同じタグで再実行すると:
+
+1. `Create translation branch` ステップがリモートの同名ブランチから `content/ja/` を復元
+2. `Translate files` ステップが「ベースコミット（タグ）と差分があり、かつ日本語を含む」ファイルをスキップ（成功扱い）し、未翻訳分のみを翻訳
+
+mainに既にマージ済みの古い翻訳はベースコミットと一致するため、スキップ対象にならず正しく再翻訳されます。
 
 ### 新ワークショップ検出とドラフトPR
 
@@ -180,6 +203,9 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 | ---- | ------- |
 | 翻訳が実行されない | upstreamに新しいタグがあるか確認。手動実行で `force_translate` を有効化。`.last-translated-tag` の内容を確認 |
 | 翻訳が失敗する | AWS認証情報の設定を確認。Claude Code CLIのバージョンを確認。ログでエラーメッセージを特定 |
+| `ExpiredToken` / 認証エラーで失敗する | `Configure refreshable AWS credentials` ステップの `aws sts get-caller-identity` 検証結果を確認。`AWS_ROLE_ARN` シークレットとIAMロールの信頼ポリシー（OIDCプロバイダー設定）を確認 |
+| ジョブがタイムアウトした | 同じタグでワークフローを再実行する。翻訳済みファイルはリモートの `translate/{tag}` ブランチから復元・スキップされ、未翻訳分のみ翻訳される |
+| Bedrockのスロットリングが頻発する | ワークフロー env の `TRANSLATE_PARALLEL_JOBS`（デフォルト4）を下げる |
 | upstream へのPR作成失敗 | `UPSTREAM_PAT` の設定・有効期限・権限を確認 |
 | `refusing to allow ... without workflows permission` エラー | `FORK_SYNC_PAT` 未設定または `Workflows: Read and write` 権限不足。GitHub の Fine-grained PAT を再発行し fork リポジトリのみに `Contents` + `Workflows` の write を付与 |
 

@@ -41,6 +41,8 @@ permissions: {}
 env:
   AWS_REGION: us-west-2
   ANTHROPIC_MODEL: global.anthropic.claude-opus-4-6-v1
+  # claude プロセスの同時実行数。Bedrockのスロットリングが目立つ場合は下げる
+  TRANSLATE_PARALLEL_JOBS: "4"
   UPSTREAM_REPO: splunk/observability-workshop
   UPSTREAM_BRANCH: main
   FORK_REPO: ${{ github.repository }}
@@ -119,7 +121,9 @@ jobs:
     needs: check-new-release
     if: inputs.cleanup_only != true && needs.check-new-release.outputs.has_new_release == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # 翻訳ステップ(240分) + 前後処理を収める。AWS認証はcredential_processで
+    # 都度更新されるため、IAMロールのMaxSessionDurationには縛られない
+    timeout-minutes: 300
     permissions:
       id-token: write
       contents: write
@@ -321,13 +325,72 @@ jobs:
             echo "No new workshops detected"
           fi
 
-      - name: Configure AWS credentials via OIDC
+      # aws-actions/configure-aws-credentials はジョブ冒頭に一度だけ取得した静的な
+      # 一時クレデンシャルを環境変数に書き出すため、翻訳時間がIAMロールの
+      # MaxSessionDuration（組織ポリシーで延長不可）を超えると失効してジョブが失敗する。
+      # 代わりに AWS SDK の credential_process を使い、Bedrock呼び出し側のプロセスが
+      # 必要とした時点で GitHub OIDC トークン → AssumeRoleWithWebIdentity を都度実行する。
+      # 翻訳は1ファイルごとに短命な claude プロセスで行われるため、ジョブ全体の実行時間が
+      # セッション上限を超えてもクレデンシャルが失効しない。
+      - name: Configure refreshable AWS credentials via OIDC credential_process
         if: steps.detect.outputs.has_files == 'true'
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions-translation
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          mkdir -p "$HOME/.aws"
+
+          cat > "$HOME/.aws/oidc-credential-process.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          # AWS credential_process: GitHub OIDC トークンを取得して AssumeRoleWithWebIdentity を実行する。
+          # 取得したクレデンシャルはキャッシュし、失効5分前を切ったら再取得する。
+          set -euo pipefail
+
+          CACHE_FILE="${RUNNER_TEMP:-/tmp}/aws-oidc-creds.json"
+
+          if [ -f "$CACHE_FILE" ]; then
+            EXPIRATION=$(jq -r '.Expiration // empty' "$CACHE_FILE" 2>/dev/null || true)
+            if [ -n "$EXPIRATION" ] && [ "$(date -d "$EXPIRATION" +%s)" -gt "$(( $(date +%s) + 300 ))" ]; then
+              cat "$CACHE_FILE"
+              exit 0
+            fi
+          fi
+
+          # OIDC トークンはジョブ実行中いつでも再発行できる（id-token: write 権限が必要）
+          JWT=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+
+          # AssumeRoleWithWebIdentity は署名不要のAPIなので、AWS CLI 自身の
+          # クレデンシャル解決（このスクリプト自身への再帰）を確実に避ける
+          CREDS=$(AWS_CONFIG_FILE=/dev/null aws sts assume-role-with-web-identity \
+            --role-arn "__ROLE_ARN__" \
+            --role-session-name github-actions-translation \
+            --web-identity-token "$JWT" \
+            --region "${AWS_REGION:-us-west-2}" \
+            --query 'Credentials' --output json \
+            | jq '{Version: 1, AccessKeyId, SecretAccessKey, SessionToken, Expiration}')
+
+          # 並列実行中の claude プロセスと書き込みが競合しないよう、アトミックに更新する
+          TMP_FILE=$(mktemp "${CACHE_FILE}.XXXXXX")
+          printf '%s\n' "$CREDS" > "$TMP_FILE"
+          mv "$TMP_FILE" "$CACHE_FILE"
+          printf '%s\n' "$CREDS"
+          SCRIPT
+
+          sed -i "s|__ROLE_ARN__|${AWS_ROLE_ARN}|" "$HOME/.aws/oidc-credential-process.sh"
+          chmod +x "$HOME/.aws/oidc-credential-process.sh"
+
+          cat > "$HOME/.aws/config" <<EOF
+          [default]
+          region = ${AWS_REGION}
+          credential_process = ${HOME}/.aws/oidc-credential-process.sh
+          EOF
+
+          # AWS SDK v2 系ツールにも ~/.aws/config を読ませる（v3 はデフォルトで読む）
+          echo "AWS_SDK_LOAD_CONFIG=1" >> "$GITHUB_ENV"
+
+          # 認証経路をここで検証し、設定ミスは翻訳開始前に fail fast させる
+          aws sts get-caller-identity > /dev/null
+          echo "AWS credential_process configured and verified"
 
       - name: Setup Node.js
         if: steps.detect.outputs.has_files == 'true'
@@ -361,22 +424,52 @@ jobs:
 
           # -B = 既存ブランチがあれば現在コミットにリセット、なければ新規作成（冪等）
           git checkout -B "${BRANCH_NAME}"
+
+          # 前回実行が途中で失敗・タイムアウトしていた場合、リモートに残っている
+          # 同名ブランチから翻訳済みの content/ja を復元する。復元されたファイルは
+          # Translate files ステップでスキップされ、未翻訳分だけを翻訳して再開できる
+          if git fetch origin "refs/heads/${BRANCH_NAME}" 2>/dev/null; then
+            git checkout FETCH_HEAD -- content/ja/ 2>/dev/null || true
+            RESTORED_COUNT=$(git diff --name-only HEAD -- content/ja/ | wc -l)
+            echo "Restored ${RESTORED_COUNT} file(s) from previous run of ${BRANCH_NAME}"
+          fi
+
           echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
 
       - name: Translate files
         id: translate
         if: steps.detect.outputs.has_files == 'true'
-        timeout-minutes: 120
+        timeout-minutes: 240
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
         run: |
           # Configuration
-          PARALLEL_JOBS=4
+          PARALLEL_JOBS="${TRANSLATE_PARALLEL_JOBS:-4}"
           FILE_TIMEOUT=300  # 5 minutes per file
           MAX_RETRIES=3
 
           # Create result directories
           mkdir -p /tmp/translate_results
+
+          # 再開サポート: 前回実行（同一タグの translate ブランチ）で翻訳済みのファイルは
+          # スキップして成功扱いにする。「ベースコミットと差分があり、かつ日本語を含む」
+          # ファイルが対象（mainに残っている古い翻訳はベースと一致するため再翻訳される）
+          : > /tmp/files_remaining.txt
+          while IFS= read -r EN_FILE; do
+            if [ -z "$EN_FILE" ]; then continue; fi
+            JA_FILE="${EN_FILE/content\/en/content\/ja}"
+            if [ -f "$JA_FILE" ] \
+              && ! git diff --quiet HEAD -- "$JA_FILE" \
+              && grep -Pq '[\x{3040}-\x{309F}\x{30A0}-\x{30FF}]' "$JA_FILE"; then
+              echo "Skipping (translated in previous run): ${EN_FILE}"
+              echo "success:${EN_FILE}" > "/tmp/translate_results/$(echo "$EN_FILE" | md5sum | cut -d' ' -f1)"
+            else
+              echo "$EN_FILE" >> /tmp/files_remaining.txt
+            fi
+          done < /tmp/files_to_translate.txt
+
+          REMAINING_COUNT=$(grep -c . /tmp/files_remaining.txt || true)
+          echo "Files to translate this run: ${REMAINING_COUNT} / $(wc -l < /tmp/files_to_translate.txt)"
 
           # Define translation function
           translate_file() {
@@ -461,7 +554,7 @@ jobs:
 
           # Run translations in parallel
           echo "Starting parallel translation with ${PARALLEL_JOBS} jobs..."
-          cat /tmp/files_to_translate.txt | \
+          cat /tmp/files_remaining.txt | \
             xargs -P "${PARALLEL_JOBS}" -I {} bash -c 'translate_file "$1" "$2" "$3"' _ {} "${FILE_TIMEOUT}" "${MAX_RETRIES}"
 
           # Aggregate results
@@ -519,7 +612,7 @@ jobs:
 
       - name: Re-translate untranslated files
         if: steps.detect.outputs.has_files == 'true' && steps.coverage-check.outputs.untranslated_count != '0'
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
         run: |
