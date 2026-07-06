@@ -52,6 +52,11 @@ gentksb/observability-workshop
     ├── SKILL.md
     └── references/translation-guide.md
 
+.github/scripts/
+├── sync-ja-mirror.sh          # アセットミラー + orphan掃除（Phase 1）
+├── apply-en-patch.sh          # en diffのhunk単位機械適用（Phase 2）
+└── check-structure-parity.sh  # en/ja構造検証（Phase 3）
+
 .github/workflows/
 ├── sync-and-translate.yml
 ├── CLAUDE.md
@@ -71,5 +76,18 @@ README.md
 3. `/splunk-workshop-ja-translator` スキルで翻訳を実行
 4. `hugo serve` でプレビュー確認
 5. PRを作成
+
+### main / translate/* ブランチでのSkill利用
+
+Skillは `ja-translation-system` ブランチにのみ存在するため、`main` や `translate/*` をチェックアウトするとプロジェクトSkillとしてはロードされない。個人Skillとして常時利用できるようにするには、worktree経由でsymlinkを張る:
+
+```bash
+git worktree add ~/observability-workshop-system ja-translation-system
+mkdir -p ~/.claude/skills
+ln -s ~/observability-workshop-system/.claude/skills/splunk-workshop-ja-translator \
+  ~/.claude/skills/splunk-workshop-ja-translator
+```
+
+注意: SKILL.md frontmatter のフック（textlint・翻訳カバレッジ検査）は `$CLAUDE_PROJECT_DIR` 配下の設定ファイルを参照するため、`translate/*` ブランチ上ではスキップまたは失敗する（翻訳自体には影響しない）。
 
 自動翻訳ワークフローの詳細は `.github/workflows/CLAUDE.md` を参照。

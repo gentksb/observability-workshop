@@ -32,18 +32,25 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 
 #### 手動実行オプション
 
+実行目的を `run_mode` で1つ選択します。
+
 | オプション | 説明 | デフォルト |
-|-----------|------|-----------|
-| `force_translate` | 新しいタグがなくても翻訳を実行 | false |
-| `translate_all_untranslated` | すべての未翻訳コンテンツも翻訳 | false |
+| --------- | ---- | --------- |
+| `run_mode` | `auto`（定期実行と同じ） / `retranslate-latest`（最新リリース分の訳し直し） / `fill-missing-translations`（未翻訳ファイルの補完） / `cleanup-only`（PR・ブランチ掃除のみ） | `auto` |
+| `dry_run` | 掃除のクローズ・削除対象を一覧表示するだけで実行しない | false |
+| `retry_attempt` | 内部用（タイムアウト自動リトライのカウンタ）。手動実行では変更しない | 0 |
 
 #### 処理フロー
 
 1. **新リリースチェック**: upstreamの最新タグを取得し、前回翻訳したタグと比較
 2. **mainブランチ同期**: 新しいタグがあれば、mainをupstreamのタグにリセット
-3. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳
-4. **PR作成**: upstreamリポジトリにドラフトPRを作成
-5. **タグ記録**: 翻訳したタグを`.last-translated-tag`に記録
+3. **ミラー同期**: md以外のアセットを `content/en` → `content/ja` でミラーし、en側に対応物のないja側ファイルを削除
+4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳。既存訳のあるファイルは変更hunkだけを反映（機械パッチ → LLM差分翻訳 → 全文翻訳の3段フォールバック）
+5. **構造検証**: frontmatter・shortcode・見出し・コードフェンスを en/ja で比較し、不一致をPR本文に警告
+6. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップ検出時はドラフトPR）
+7. **タグ記録**: 翻訳したタグを`.last-translated-tag`に記録
+
+各フェーズの詳細・cleanupジョブ・自動リトライは [CLAUDE.md](./CLAUDE.md) を参照してください。
 
 #### 必要なシークレット
 
@@ -134,7 +141,7 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 ### 翻訳が実行されない
 
 - upstreamに新しいタグがあるか確認
-- 手動実行で`force_translate`を有効にして実行
+- 訳し直しは `run_mode=retranslate-latest`、未翻訳の穴埋めは `run_mode=fill-missing-translations` で手動実行
 - `.last-translated-tag`ファイルの内容を確認
 
 ### 翻訳が失敗する
@@ -145,8 +152,9 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 
 ### 翻訳ジョブが途中で失敗・タイムアウトした
 
-- 同じタグでワークフローを再実行する
+- `retry-on-failure` ジョブが最大2回まで自動で再dispatchする
 - 翻訳済みファイルはリモートの `translate/{tag}` ブランチから復元・スキップされ、未翻訳分のみが翻訳される（レジューム）
+- 自動リトライでも完了しない場合のみ、同じ設定で手動再実行する
 
 ### upstream へのPRが作成できない
 

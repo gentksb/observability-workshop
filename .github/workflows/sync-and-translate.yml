@@ -6,31 +6,31 @@ on:
     - cron: '0 0 * * 1'
   workflow_dispatch:
     inputs:
-      force_translate:
-        description: 'Force translation even if no new tags'
+      run_mode:
+        description: >-
+          実行目的:
+          auto = 定期実行と同じ（新リリースがあれば同期・翻訳） /
+          retranslate-latest = 翻訳品質に問題があったとき最新リリース分を訳し直す /
+          fill-missing-translations = 過去に失敗・スキップした未翻訳ファイルを補完する /
+          cleanup-only = 翻訳せず古いPR・ブランチの掃除だけ行う
+        required: false
+        type: choice
+        default: 'auto'
+        options:
+          - auto
+          - retranslate-latest
+          - fill-missing-translations
+          - cleanup-only
+      dry_run:
+        description: '掃除の安全確認: クローズ・削除対象を一覧表示するだけで実行しない'
         required: false
         type: boolean
         default: false
-      translate_all_untranslated:
-        description: 'Also translate all untranslated content'
-        required: false
-        type: boolean
-        default: false
-      cleanup_only:
-        description: 'Skip sync/translate/PR creation; run cleanup against current upstream state'
-        required: false
-        type: boolean
-        default: false
-      cleanup_dry_run:
-        description: 'Cleanup mode: list targets without closing/deleting'
-        required: false
-        type: boolean
-        default: false
-      cleanup_max_prs:
-        description: 'Max stale PRs to process per run (safety cap)'
+      retry_attempt:
+        description: '(内部用) タイムアウト自動リトライのカウンタ。手動実行では変更しない'
         required: false
         type: number
-        default: 10
+        default: 0
 
 concurrency:
   group: sync-and-translate
@@ -47,6 +47,12 @@ env:
   UPSTREAM_BRANCH: main
   FORK_REPO: ${{ github.repository }}
   LAST_TAG_FILE: .last-translated-tag
+  # schedule トリガーでは inputs.* が空になるため 'auto' に正規化する
+  RUN_MODE: ${{ inputs.run_mode || 'auto' }}
+  # 1回の実行でクローズする陳腐化PRの上限（初回事故時の被害を局所化する安全装置）
+  CLEANUP_MAX_PRS: "10"
+  # CI実行時にclaudeへ注入する翻訳ルール（Setup translation tools ステップで取得）
+  TRANSLATION_GUIDE: /tmp/translation-guide.md
 
 jobs:
   check-new-release:
@@ -72,8 +78,6 @@ jobs:
 
       - name: Check for new release tags
         id: check
-        env:
-          FORCE_TRANSLATE: ${{ inputs.force_translate }}
         run: |
           # Get the latest release tag from upstream (semantic versioning)
           LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname | head -1)
@@ -95,14 +99,36 @@ jobs:
             echo "No previous translation record found"
           fi
 
-          # Check if force translate is enabled
-          if [ "$FORCE_TRANSLATE" = "true" ]; then
-            echo "Force translate enabled"
-            echo "has_new_release=true" >> $GITHUB_OUTPUT
-            echo "new_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
-            echo "last_tag=${LAST_TAG}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          case "$RUN_MODE" in
+            retranslate-latest)
+              # 訳し直しモード: 比較ベースを1つ前の翻訳タグに巻き戻し、
+              # 直近リリース分の変更ファイルを再翻訳対象にする。
+              # 1つ前の値は .last-translated-tag のgit履歴（2番目に新しいコミット）から取得
+              PREV_COMMIT=$(git log -n 2 --format=%H -- "${{ env.LAST_TAG_FILE }}" | sed -n 2p)
+              PREV_TAG=""
+              if [ -n "$PREV_COMMIT" ]; then
+                PREV_TAG=$(git show "${PREV_COMMIT}:${{ env.LAST_TAG_FILE }}" 2>/dev/null | tr -d '[:space:]' || true)
+              fi
+              if [ -n "$PREV_TAG" ]; then
+                echo "Retranslate mode: comparing ${PREV_TAG}..${LATEST_TAG}"
+                LAST_TAG="$PREV_TAG"
+              else
+                echo "Retranslate mode: no previous tag history, using current last tag"
+              fi
+              echo "has_new_release=true" >> $GITHUB_OUTPUT
+              echo "new_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+              echo "last_tag=${LAST_TAG}" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+            fill-missing-translations)
+              # 未翻訳補完モード: 新リリースの有無に関わらず最新タグで実行する
+              echo "Fill-missing mode: proceeding with ${LATEST_TAG}"
+              echo "has_new_release=true" >> $GITHUB_OUTPUT
+              echo "new_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+              echo "last_tag=${LAST_TAG}" >> $GITHUB_OUTPUT
+              exit 0
+              ;;
+          esac
 
           # Compare tags
           if [ "$LATEST_TAG" = "$LAST_TAG" ]; then
@@ -119,7 +145,7 @@ jobs:
   sync-and-translate:
     name: Sync main and translate
     needs: check-new-release
-    if: inputs.cleanup_only != true && needs.check-new-release.outputs.has_new_release == 'true'
+    if: inputs.run_mode != 'cleanup-only' && needs.check-new-release.outputs.has_new_release == 'true'
     runs-on: ubuntu-24.04
     # 翻訳ステップ(240分) + 前後処理を収める。AWS認証はcredential_processで
     # 都度更新されるため、IAMロールのMaxSessionDurationには縛られない
@@ -133,6 +159,11 @@ jobs:
       failed_count: ${{ steps.translate.outputs.failed_count }}
       has_new_workshops: ${{ steps.detect-new-workshops.outputs.has_new_workshops }}
       new_workshops: ${{ steps.detect-new-workshops.outputs.new_workshops }}
+      has_commits: ${{ steps.commit.outputs.has_commits }}
+      mirror_change_count: ${{ steps.mirror.outputs.change_count }}
+      mirror_report: ${{ steps.mirror.outputs.report }}
+      parity_warning_count: ${{ steps.parity.outputs.warning_count }}
+      parity_warnings: ${{ steps.parity.outputs.warnings }}
     steps:
       - name: Checkout main branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -166,37 +197,38 @@ jobs:
 
       - name: Detect files to translate
         id: detect
-        env:
-          TRANSLATE_ALL: ${{ inputs.translate_all_untranslated }}
         run: |
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
           LAST_TAG="${{ needs.check-new-release.outputs.last_tag }}"
 
-          # Determine comparison base
-          if [ -n "$LAST_TAG" ]; then
-            COMPARE_BASE="${LAST_TAG}"
-          else
-            # First run: translate all existing English content
-            COMPARE_BASE=$(git rev-list --max-parents=0 HEAD)
+          # 差分翻訳対象の検出（fill-missing モードでは差分は対象にしない）
+          TRANSLATION_TARGETS=""
+          if [ "$RUN_MODE" != "fill-missing-translations" ]; then
+            # Determine comparison base
+            if [ -n "$LAST_TAG" ]; then
+              COMPARE_BASE="${LAST_TAG}"
+            else
+              # First run: translate all existing English content
+              COMPARE_BASE=$(git rev-list --max-parents=0 HEAD)
+            fi
+
+            echo "Comparing ${COMPARE_BASE}..${NEW_TAG}"
+
+            # Get changed English markdown files
+            CHANGED_FILES=$(git diff --name-only "${COMPARE_BASE}..${NEW_TAG}" -- ':(glob)content/en/**/*.md' 2>/dev/null | sort || true)
+
+            # Filter files that need translation
+            for file in $CHANGED_FILES; do
+              if [ ! -f "$file" ]; then
+                continue
+              fi
+              TRANSLATION_TARGETS="${TRANSLATION_TARGETS}${file}"$'\n'
+            done
           fi
 
-          echo "Comparing ${COMPARE_BASE}..${NEW_TAG}"
-
-          # Get changed English markdown files
-          CHANGED_FILES=$(git diff --name-only "${COMPARE_BASE}..${NEW_TAG}" -- ':(glob)content/en/**/*.md' 2>/dev/null | sort || true)
-
-          # Filter files that need translation
-          TRANSLATION_TARGETS=""
-          for file in $CHANGED_FILES; do
-            if [ ! -f "$file" ]; then
-              continue
-            fi
-            TRANSLATION_TARGETS="${TRANSLATION_TARGETS}${file}"$'\n'
-          done
-
-          # Find all untranslated files if requested
+          # 未翻訳ファイルの補完対象を検出（fill-missing モードのみ）
           UNTRANSLATED_FILES=""
-          if [ "$TRANSLATE_ALL" = "true" ]; then
+          if [ "$RUN_MODE" = "fill-missing-translations" ]; then
             echo "Scanning for all untranslated files..."
 
             for en_file in $(find content/en -name "*.md" -type f 2>/dev/null | sort); do
@@ -393,7 +425,6 @@ jobs:
           echo "AWS credential_process configured and verified"
 
       - name: Setup Node.js
-        if: steps.detect.outputs.has_files == 'true'
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
         with:
           node-version: '24'
@@ -403,7 +434,6 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2
 
       - name: Setup translation tools
-        if: steps.detect.outputs.has_files == 'true'
         run: |
           git fetch origin ja-translation-system
           git show origin/ja-translation-system:package.json > package.json
@@ -413,11 +443,22 @@ jobs:
           mkdir -p .claude/skills/splunk-workshop-ja-translator/textlint-rules
           git show origin/ja-translation-system:.claude/skills/splunk-workshop-ja-translator/textlint-rules/no-ja-trailing-colon.js \
             > .claude/skills/splunk-workshop-ja-translator/textlint-rules/no-ja-trailing-colon.js
+
+          # 翻訳ルール（用語集・文体・構造維持）を取得し、claude呼び出し時に
+          # --append-system-prompt で注入する（translate ブランチにはSkillが存在しないため）
+          git show origin/ja-translation-system:.claude/skills/splunk-workshop-ja-translator/references/translation-guide.md \
+            > "${TRANSLATION_GUIDE}"
+
+          # ミラー同期・機械パッチ・構造検証スクリプトを取得する。
+          # --worktree のみ指定で index には乗せない（Commit ステップの git add は
+          # content/ja/ 限定なので、これらのファイルがコミットに混入することはない）
+          git restore --source=origin/ja-translation-system --worktree -- .github/scripts
+          chmod +x .github/scripts/*.sh
+
           npm ci
 
       - name: Create translation branch
         id: translate-branch
-        if: steps.detect.outputs.has_files == 'true'
         run: |
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
           BRANCH_NAME="translate/${NEW_TAG}"
@@ -427,8 +468,10 @@ jobs:
 
           # 前回実行が途中で失敗・タイムアウトしていた場合、リモートに残っている
           # 同名ブランチから翻訳済みの content/ja を復元する。復元されたファイルは
-          # Translate files ステップでスキップされ、未翻訳分だけを翻訳して再開できる
-          if git fetch origin "refs/heads/${BRANCH_NAME}" 2>/dev/null; then
+          # Translate files ステップでスキップされ、未翻訳分だけを翻訳して再開できる。
+          # retranslate-latest は「訳し直し」が目的のため復元しない
+          if [ "$RUN_MODE" != "retranslate-latest" ] \
+            && git fetch origin "refs/heads/${BRANCH_NAME}" 2>/dev/null; then
             git checkout FETCH_HEAD -- content/ja/ 2>/dev/null || true
             RESTORED_COUNT=$(git diff --name-only HEAD -- content/ja/ | wc -l)
             echo "Restored ${RESTORED_COUNT} file(s) from previous run of ${BRANCH_NAME}"
@@ -436,20 +479,48 @@ jobs:
 
           echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
 
+      - name: Mirror assets and prune orphaned Japanese files
+        id: mirror
+        run: |
+          # Phase 1（機械同期）: md以外のアセットを en→ja でミラーし、
+          # en側に対応物のない ja側ファイル・ディレクトリを削除する。
+          # 変更一覧はPR本文に記載され、PRレビューが安全弁になる
+          bash .github/scripts/sync-ja-mirror.sh | tee /tmp/mirror_report.txt
+
+          CHANGE_COUNT=$(grep -cE '^(DELETE|UPDATE|ADD) ' /tmp/mirror_report.txt || true)
+          if [ "$CHANGE_COUNT" -gt 0 ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+          echo "change_count=${CHANGE_COUNT}" >> $GITHUB_OUTPUT
+
+          # PR本文用レポート（肥大化防止のため100行で切る）
+          echo "report<<MIRROR_EOF" >> $GITHUB_OUTPUT
+          head -100 /tmp/mirror_report.txt >> $GITHUB_OUTPUT
+          if [ "$(wc -l < /tmp/mirror_report.txt)" -gt 100 ]; then
+            echo "... (truncated)" >> $GITHUB_OUTPUT
+          fi
+          echo "MIRROR_EOF" >> $GITHUB_OUTPUT
+
       - name: Translate files
         id: translate
         if: steps.detect.outputs.has_files == 'true'
         timeout-minutes: 240
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
+          LAST_TAG: ${{ needs.check-new-release.outputs.last_tag }}
         run: |
           # Configuration
           PARALLEL_JOBS="${TRANSLATE_PARALLEL_JOBS:-4}"
           FILE_TIMEOUT=300  # 5 minutes per file
           MAX_RETRIES=3
 
-          # Create result directories
-          mkdir -p /tmp/translate_results
+          # Create result directories.
+          # 残hunk diffは claude の Read ツールで読ませるため、作業ディレクトリ内に置く
+          # （/tmp などcwd外は Read の権限で拒否されうる）。.translation-tmp は未追跡かつ
+          # Commit ステップの git add 対象（content/ja/）外なのでコミットに混入しない
+          mkdir -p /tmp/translate_results "${PWD}/.translation-tmp"
 
           # 再開サポート: 前回実行（同一タグの translate ブランチ）で翻訳済みのファイルは
           # スキップして成功扱いにする。「ベースコミットと差分があり、かつ日本語を含む」
@@ -471,11 +542,35 @@ jobs:
           REMAINING_COUNT=$(grep -c . /tmp/files_remaining.txt || true)
           echo "Files to translate this run: ${REMAINING_COUNT} / $(wc -l < /tmp/files_to_translate.txt)"
 
+          # 翻訳方式の分類:
+          #   patch = マージ済みの既存訳（タグと一致し日本語を含む）がある変更ファイル。
+          #           enの変更hunkだけを反映する（機械パッチ→LLM差分翻訳→全文翻訳の3段フォールバック）
+          #   full  = 新規ファイル・既存訳なし・retranslate-latest モード。全文翻訳
+          : > /tmp/files_patch.txt
+          : > /tmp/files_full.txt
+          while IFS= read -r EN_FILE; do
+            if [ -z "$EN_FILE" ]; then continue; fi
+            JA_FILE="${EN_FILE/content\/en/content\/ja}"
+            if [ "$RUN_MODE" != "retranslate-latest" ] \
+              && [ -n "$LAST_TAG" ] \
+              && [ -f "$JA_FILE" ] \
+              && git diff --quiet HEAD -- "$JA_FILE" \
+              && grep -Pq '[\x{3040}-\x{309F}\x{30A0}-\x{30FF}]' "$JA_FILE"; then
+              echo "$EN_FILE" >> /tmp/files_patch.txt
+            else
+              echo "$EN_FILE" >> /tmp/files_full.txt
+            fi
+          done < /tmp/files_remaining.txt
+
+          echo "Patch-mode files: $(grep -c . /tmp/files_patch.txt || true)"
+          echo "Full-mode files: $(grep -c . /tmp/files_full.txt || true)"
+
           # Define translation function
           translate_file() {
             local EN_FILE="$1"
-            local FILE_TIMEOUT="$2"
-            local MAX_RETRIES="$3"
+            local MODE="$2"
+            local FILE_TIMEOUT="$3"
+            local MAX_RETRIES="$4"
             local RESULT_DIR="/tmp/translate_results"
 
             if [ -z "$EN_FILE" ]; then
@@ -483,10 +578,12 @@ jobs:
             fi
 
             # Create unique result file based on input path
-            local RESULT_FILE="${RESULT_DIR}/$(echo "$EN_FILE" | md5sum | cut -d' ' -f1)"
+            local FILE_HASH
+            FILE_HASH=$(echo "$EN_FILE" | md5sum | cut -d' ' -f1)
+            local RESULT_FILE="${RESULT_DIR}/${FILE_HASH}"
 
             echo "========================================"
-            echo "Translating: ${EN_FILE}"
+            echo "Translating (${MODE}): ${EN_FILE}"
             echo "========================================"
 
             # Calculate target path
@@ -496,10 +593,50 @@ jobs:
             # Create target directory
             mkdir -p "$JA_DIR"
 
+            # --- Stage 1+2: 差分パッチ方式 ---
+            # 既存訳を保持したまま en の変更分だけを反映する（訳ブレとトークン消費を抑える）
+            if [ "$MODE" = "patch" ]; then
+              local REMAINING_DIFF="${PWD}/.translation-tmp/${FILE_HASH}.diff"
+              local PATCH_STATUS=0
+              bash .github/scripts/apply-en-patch.sh \
+                "$EN_FILE" "$JA_FILE" "$LAST_TAG" HEAD "$REMAINING_DIFF" || PATCH_STATUS=$?
+
+              if [ "$PATCH_STATUS" -eq 0 ]; then
+                echo "Mechanically patched, no LLM needed: ${EN_FILE}"
+                echo "success:${EN_FILE}" > "$RESULT_FILE"
+                return 0
+              fi
+
+              if [ "$PATCH_STATUS" -eq 10 ]; then
+                # 機械適用できなかったhunkだけをLLMで差分翻訳する
+                local ATTEMPT
+                for ATTEMPT in 1 2; do
+                  echo "Diff-translation attempt ${ATTEMPT}/2 for ${EN_FILE}..."
+                  if timeout "${FILE_TIMEOUT}" claude --print \
+                    "The English source file ${EN_FILE} was updated. A unified diff of the English changes that could not be applied mechanically is at ${REMAINING_DIFF} (its paths refer to the Japanese file). Read that diff and the Japanese translation file ${JA_FILE}, then apply the equivalent changes to ${JA_FILE}, translating the changed English text into Japanese. Use minimal Edit operations and do NOT retranslate or rephrase any part that the diff does not touch. Follow the translation rules given in the system prompt." \
+                    --append-system-prompt "$(cat "${TRANSLATION_GUIDE}")" \
+                    --allowedTools "Edit,Read,Write" \
+                    --max-turns $((15 * ATTEMPT)) \
+                    2>&1; then
+                    echo "Diff-translated: ${EN_FILE}"
+                    echo "success:${EN_FILE}" > "$RESULT_FILE"
+                    return 0
+                  fi
+                  echo "Diff-translation attempt ${ATTEMPT} failed for ${EN_FILE}"
+                  sleep 10
+                done
+                echo "Diff-translation failed, falling back to full translation: ${EN_FILE}"
+              else
+                echo "apply-en-patch.sh exited with ${PATCH_STATUS}, falling back to full translation: ${EN_FILE}"
+              fi
+            fi
+
+            # --- Stage 3: 全文翻訳 ---
             # Copy the English file to Japanese location first
             cp "$EN_FILE" "$JA_FILE"
 
             # Copy associated images
+            # （新規ディレクトリのみ。既存ディレクトリのアセットはミラー同期ステップが管理）
             local EN_DIR=$(dirname "$EN_FILE")
             if [ -d "${EN_DIR}/img" ] && [ ! -d "${JA_DIR}/img" ]; then
               echo "Copying images from ${EN_DIR}/img to ${JA_DIR}/img"
@@ -518,7 +655,8 @@ jobs:
               echo "Translation attempt ${RETRY_COUNT}/${MAX_RETRIES} (max-turns=${CURRENT_MAX_TURNS}) for ${EN_FILE}..."
 
               if timeout "${FILE_TIMEOUT}" claude --print \
-                "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
+                "Translate the file at ${JA_FILE} from English to Japanese. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Follow the translation rules given in the system prompt. Ensure Markdown formatting, frontmatter keys, and Hugo shortcodes are preserved." \
+                --append-system-prompt "$(cat "${TRANSLATION_GUIDE}")" \
                 --allowedTools "Edit,Read,Write" \
                 --max-turns "${CURRENT_MAX_TURNS}" \
                 2>&1; then
@@ -549,13 +687,20 @@ jobs:
           }
 
           # Export function and variables for parallel execution
+          # (RUN_MODE / LAST_TAG / TRANSLATION_GUIDE はworkflow・step envとして既にexport済み)
           export -f translate_file
           export CLAUDE_CODE_USE_BEDROCK
 
-          # Run translations in parallel
+          # Run translations in parallel (patch → full の順で2バッチ)
           echo "Starting parallel translation with ${PARALLEL_JOBS} jobs..."
-          cat /tmp/files_remaining.txt | \
-            xargs -P "${PARALLEL_JOBS}" -I {} bash -c 'translate_file "$1" "$2" "$3"' _ {} "${FILE_TIMEOUT}" "${MAX_RETRIES}"
+          if [ -s /tmp/files_patch.txt ]; then
+            cat /tmp/files_patch.txt | \
+              xargs -P "${PARALLEL_JOBS}" -I {} bash -c 'translate_file "$1" patch "$2" "$3"' _ {} "${FILE_TIMEOUT}" "${MAX_RETRIES}"
+          fi
+          if [ -s /tmp/files_full.txt ]; then
+            cat /tmp/files_full.txt | \
+              xargs -P "${PARALLEL_JOBS}" -I {} bash -c 'translate_file "$1" full "$2" "$3"' _ {} "${FILE_TIMEOUT}" "${MAX_RETRIES}"
+          fi
 
           # Aggregate results
           TRANSLATED_COUNT=0
@@ -635,7 +780,8 @@ jobs:
 
             # Retry translation (1 attempt) - use the most generous turn budget for the rescue path
             if timeout "${FILE_TIMEOUT}" claude --print \
-              "Translate the file at ${JA_FILE} from English to Japanese following the /splunk-workshop-ja-translator skill guidelines. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Do not translate code blocks, CLI commands, file paths, URLs, or product names. Use です/ます form. Ensure Markdown formatting is preserved." \
+              "Translate the file at ${JA_FILE} from English to Japanese. The source English file is ${EN_FILE}. Translate in place, overwriting the current content of ${JA_FILE}. IMPORTANT: To save turns, use ONE Read followed by ONE Write that overwrites the entire file. Do not use multiple Edit calls. Follow the translation rules given in the system prompt. Ensure Markdown formatting, frontmatter keys, and Hugo shortcodes are preserved." \
+              --append-system-prompt "$(cat "${TRANSLATION_GUIDE}")" \
               --allowedTools "Edit,Read,Write" \
               --max-turns 30 \
               2>&1; then
@@ -677,9 +823,41 @@ jobs:
 
           echo "Linted ${LINT_COUNT} files"
 
+      - name: Check en/ja structure parity
+        id: parity
+        if: steps.detect.outputs.has_files == 'true'
+        run: |
+          # Phase 3（構造検証）: 翻訳結果がen側と「本文以外」で一致しているかを機械検証する。
+          # 不一致はPR本文に警告として記載する（ハードフェイルにはしない）
+          : > /tmp/parity_warnings.txt
+
+          while IFS= read -r EN_FILE; do
+            if [ -z "$EN_FILE" ]; then continue; fi
+            JA_FILE="${EN_FILE/content\/en/content\/ja}"
+            if [ ! -f "$JA_FILE" ]; then continue; fi
+            bash .github/scripts/check-structure-parity.sh "$EN_FILE" "$JA_FILE" >> /tmp/parity_warnings.txt || true
+          done < /tmp/files_to_translate.txt
+
+          WARNING_COUNT=$(grep -c . /tmp/parity_warnings.txt || true)
+          echo "warning_count=${WARNING_COUNT}" >> $GITHUB_OUTPUT
+
+          echo "warnings<<PARITY_EOF" >> $GITHUB_OUTPUT
+          head -50 /tmp/parity_warnings.txt >> $GITHUB_OUTPUT
+          if [ "$WARNING_COUNT" -gt 50 ]; then
+            echo "... (truncated)" >> $GITHUB_OUTPUT
+          fi
+          echo "PARITY_EOF" >> $GITHUB_OUTPUT
+
+          if [ "$WARNING_COUNT" -gt 0 ]; then
+            echo "::warning::${WARNING_COUNT} structure parity issue(s) detected"
+            cat /tmp/parity_warnings.txt
+          else
+            echo "All translated files match the English structure"
+          fi
+
       - name: Commit translations
         id: commit
-        if: steps.detect.outputs.has_files == 'true'
+        if: steps.detect.outputs.has_files == 'true' || steps.mirror.outputs.changed == 'true'
         run: |
           # Only add content/ja/ directory
           git add content/ja/
@@ -691,8 +869,8 @@ jobs:
           fi
 
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
-          TRANSLATED_COUNT="${{ steps.translate.outputs.translated_count }}"
-          FAILED_COUNT="${{ steps.translate.outputs.failed_count }}"
+          TRANSLATED_COUNT="${{ steps.translate.outputs.translated_count || '0' }}"
+          FAILED_COUNT="${{ steps.translate.outputs.failed_count || '0' }}"
 
           printf '%s\n\n%s\n\n%s\n%s\n\n%s\n' \
             "Add Japanese translations for ${NEW_TAG}" \
@@ -714,7 +892,7 @@ jobs:
   create-pr:
     name: Create PR for review
     needs: [check-new-release, sync-and-translate]
-    if: inputs.cleanup_only != true && needs.sync-and-translate.outputs.translation_branch != ''
+    if: inputs.run_mode != 'cleanup-only' && needs.sync-and-translate.outputs.has_commits == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -732,6 +910,11 @@ jobs:
         id: create-pr
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_PAT }}
+          # ファイル名を含む複数行出力はシェル変数展開ではなくenv経由で渡す（インジェクション対策）
+          MIRROR_CHANGE_COUNT: ${{ needs.sync-and-translate.outputs.mirror_change_count }}
+          MIRROR_REPORT: ${{ needs.sync-and-translate.outputs.mirror_report }}
+          PARITY_WARNING_COUNT: ${{ needs.sync-and-translate.outputs.parity_warning_count }}
+          PARITY_WARNINGS: ${{ needs.sync-and-translate.outputs.parity_warnings }}
         run: |
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
           TRANSLATED_COUNT="${{ needs.sync-and-translate.outputs.translated_count }}"
@@ -746,8 +929,34 @@ jobs:
               "" \
               "Japanese translations for release ${NEW_TAG}." \
               "" \
-              "- **Translated files**: ${TRANSLATED_COUNT}" \
-              "- **Failed files**: ${FAILED_COUNT}"
+              "- **Translated files**: ${TRANSLATED_COUNT:-0}" \
+              "- **Failed files**: ${FAILED_COUNT:-0}"
+
+            # Asset mirror / orphan cleanup section (only when changes were made)
+            if [ -n "${MIRROR_CHANGE_COUNT:-}" ] && [ "${MIRROR_CHANGE_COUNT}" != "0" ]; then
+              printf '%s\n' \
+                "" \
+                "## Asset sync and orphan cleanup" \
+                "" \
+                "Non-markdown assets were mirrored from \`content/en\`, and Japanese files with no English counterpart were removed:" \
+                "" \
+                '```text'
+              printf '%s\n' "${MIRROR_REPORT}"
+              printf '%s\n' '```'
+            fi
+
+            # Structure parity warnings section (only when mismatches were found)
+            if [ -n "${PARITY_WARNING_COUNT:-}" ] && [ "${PARITY_WARNING_COUNT}" != "0" ]; then
+              printf '%s\n' \
+                "" \
+                "## :warning: Structure parity warnings" \
+                "" \
+                "These files differ from the English source in structure (frontmatter keys, shortcodes, headings, or code fences) and need review:" \
+                "" \
+                '```text'
+              printf '%s\n' "${PARITY_WARNINGS}"
+              printf '%s\n' '```'
+            fi
 
             # Add new workshops section if detected
             if [ "$HAS_NEW_WORKSHOPS" = "yes" ]; then
@@ -862,7 +1071,7 @@ jobs:
     needs: [check-new-release, sync-and-translate, create-pr]
     if: |
       always()
-      && (inputs.cleanup_only == true || needs.create-pr.outputs.pr_number != '')
+      && (inputs.run_mode == 'cleanup-only' || needs.create-pr.outputs.pr_number != '')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -880,8 +1089,7 @@ jobs:
           NEW_PR_INPUT: ${{ needs.create-pr.outputs.pr_number }}
           NEW_BRANCH_INPUT: ${{ needs.sync-and-translate.outputs.translation_branch }}
           NEW_TAG_INPUT: ${{ needs.check-new-release.outputs.new_tag }}
-          DRY_RUN: ${{ inputs.cleanup_dry_run }}
-          MAX_PRS: ${{ inputs.cleanup_max_prs }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
 
@@ -889,7 +1097,7 @@ jobs:
           NEW_BRANCH="${NEW_BRANCH_INPUT}"
           NEW_TAG="${NEW_TAG_INPUT}"
           DRY_RUN="${DRY_RUN:-false}"
-          MAX="${MAX_PRS:-10}"
+          MAX="${CLEANUP_MAX_PRS:-10}"
 
           # cleanup_only モード時は最新マージ済み翻訳PRから値を補完
           if [ -z "$NEW_PR" ]; then
@@ -969,7 +1177,7 @@ jobs:
     needs: [check-new-release, sync-and-translate, create-pr, cleanup-stale-prs]
     if: |
       always()
-      && (inputs.cleanup_only == true || needs.create-pr.outputs.pr_number != '')
+      && (inputs.run_mode == 'cleanup-only' || needs.create-pr.outputs.pr_number != '')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -989,7 +1197,7 @@ jobs:
         id: delete
         env:
           CURRENT_BRANCH: ${{ needs.sync-and-translate.outputs.translation_branch }}
-          DRY_RUN: ${{ inputs.cleanup_dry_run }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
 
@@ -1057,8 +1265,43 @@ jobs:
 
           echo "${NEW_TAG}" > "${{ env.LAST_TAG_FILE }}"
           git add "${{ env.LAST_TAG_FILE }}"
+
+          # retranslate-latest / fill-missing-translations では同一タグの再実行になるため、
+          # 変更がない場合はコミットせず正常終了する
+          if git diff --staged --quiet; then
+            echo "Tag file unchanged (${NEW_TAG}), skipping commit"
+            exit 0
+          fi
+
           git commit -m "Update last translated tag to ${NEW_TAG}"
           git push
+
+  retry-on-failure:
+    name: Auto-retry after translation failure
+    needs: [check-new-release, sync-and-translate]
+    # 翻訳ジョブが失敗（タイムアウト含む）した場合、同一設定で自身を再dispatchする。
+    # レジューム機構により再実行は未翻訳分のみを処理する。無限ループ防止のため2回まで。
+    # workflow_dispatch は GITHUB_TOKEN の再帰トリガー制限の例外なので PAT は不要
+    if: >-
+      always()
+      && needs.check-new-release.outputs.has_new_release == 'true'
+      && needs.sync-and-translate.result == 'failure'
+      && (inputs.retry_attempt || 0) < 2
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch workflow to resume translation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEXT_ATTEMPT=$(( ${{ inputs.retry_attempt || 0 }} + 1 ))
+          echo "Translation job failed; re-dispatching (attempt ${NEXT_ATTEMPT}/2)"
+          gh workflow run sync-and-translate.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f run_mode="${RUN_MODE:-auto}" \
+            -f retry_attempt="${NEXT_ATTEMPT}"
 
   notify-slack:
     name: Notify Slack
