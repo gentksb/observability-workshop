@@ -38,12 +38,13 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 4. **ミラー同期（Phase 1・機械）** (`sync-ja-mirror.sh`): md以外のアセット（画像等）を `content/en` → `content/ja` で常時ミラーし、en側に対応物のない ja側ファイル・ディレクトリ（レガシー資産）を削除。変更一覧はPR本文に記載
 5. **翻訳（Phase 2・3段フォールバック）**: 変更されたファイルをClaude Code (Bedrock)で翻訳。マージ済みの既存訳があるファイルは全文再翻訳せず、enの変更hunkだけを反映する（後述）。前回実行が途中で失敗していた場合は、リモートの `translate/{tag}` ブランチから翻訳済みファイルを復元し、未翻訳分のみを翻訳して再開する（レジューム）
 6. **構造検証（Phase 3・機械）** (`check-structure-parity.sh`): frontmatterキー・shortcode・見出しレベル・コードフェンス数を en/ja で比較し、不一致をPR本文に警告として記載
-7. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップがある場合はドラフトPR）
-8. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
-9. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
-10. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
-11. **失敗時の自動リトライ** (`retry-on-failure`): 翻訳ジョブが失敗（タイムアウト含む）した場合、同一設定で自身を再dispatch（最大2回）。レジュームにより未翻訳分のみ処理される
-12. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
+7. **ビルド + E2E構造検証（Phase 3・機械）** (`compare-rendered-structure.ts`): サイト全体を hugo build し、レンダリング後HTMLのDOM構造骨格を en/ja ページペアで比較。ビルド失敗時はPRをドラフト化
+8. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップ検出時・ビルド失敗時はドラフトPR）
+9. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
+10. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
+11. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
+12. **失敗時の自動リトライ** (`retry-on-failure`): 翻訳ジョブが失敗（タイムアウト含む）した場合、同一設定で自身を再dispatch（最大2回）。レジュームにより未翻訳分のみ処理される
+13. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
 
 補助スクリプトは `ja-translation-system` ブランチの `.github/scripts/` で管理し、`Setup translation tools` ステップで translate ブランチの作業ツリーに取得する（indexには乗せないためコミットに混入しない）。
 
@@ -54,6 +55,24 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 1. **機械パッチ（トークン消費ゼロ）** (`apply-en-patch.sh`): en側の `last_tag..new_tag` diff をhunk単位で ja ファイルに `git apply`。コードブロック・URL・英語のまま維持された箇所への変更（typo修正の大半）はここで反映される
 2. **LLM差分翻訳**: 機械適用できなかったhunk（翻訳済みプローズへの変更）だけをdiffとしてLLMに渡し、既存訳への最小Editを生成。既存訳を保持するため訳ブレが減り、全文再翻訳よりトークン消費が大幅に少ない
 3. **全文翻訳**: 1・2が失敗した場合のフォールバック（従来方式）
+
+### hugo build と E2E構造検証
+
+翻訳・ミラー同期の完了後、コミット前にサイト全体をビルドして最終検証する。
+
+**hugo build**:
+
+- Hugoバージョンは upstream のビルド定義から実行時に解決する（優先順: `deploy-workshop.yml` の `hugo-version` → `hugo.toml` の `module.hugoVersion.min`）。ハードコードしないため、upstream のHugo更新に自動追従する
+- translate ブランチは upstream 完全コピーのため、Hugo設定・テーマ（Hugo modules、要Go。GitHubホストランナーにプリインストール済み）はそのまま使える
+- ビルド失敗時はジョブを落とさず、PRを**ドラフト**で作成し、PR本文にビルドログ末尾を記載する（upstream起因の失敗で自動リトライが空転するのを避けるため）
+
+**E2E構造検証** (`compare-rendered-structure.ts`、TypeScript + cheerio):
+
+- ビルド出力の `public/en/**/index.html` と `public/ja/**/index.html` をページ単位でペアリングし、本文コンテナ（`article#content`）のDOM構造骨格を比較する
+- 比較する不変量: 見出しレベルの順列、コードブロックの数と正規化テキストのハッシュ、画像srcファイル名の順列、外部リンク集合、内部リンク本数、shortcode由来コンテナ（`.tabs` / `.callout` / `table` / `details`）の順列
+- パンくず・ページャー・TOC等のナビゲーション（`nav` / `aside`）は、ja側の未翻訳ページの有無でリンク数が正当に変わるため比較から除外する
+- en対応ページのないja側ページ（orphan）も検出する（ミラー同期の最終確認を兼ねる）
+- 結果はPR本文の警告セクション（50行まで）と、Actions artifact `render-structure-report`（JSONフルレポート、保持30日）に出力する
 
 ### 翻訳ルールの注入
 
@@ -239,6 +258,8 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 | ジョブがタイムアウトした | `retry-on-failure` ジョブが最大2回まで自動で再dispatchする（レジュームにより未翻訳分のみ処理）。それでも完了しない場合のみ手動で再実行 |
 | 翻訳品質に問題があるファイルが混ざった | `run_mode=retranslate-latest` で最新リリース分を全文訳し直す（レジューム復元は行われない） |
 | PR本文に Structure parity warnings が出た | 該当ファイルの frontmatter・shortcode・見出し・コードフェンスを en 側と目視比較し、PR上で修正する。恒常的に出る場合は翻訳ルール（translation-guide.md）の強化を検討 |
+| PRがドラフトで作成され Hugo build failed が出た | PR本文のビルドログを確認。jaコンテンツ起因（shortcode誤記等）ならPR上で修正、upstream起因なら解消後に再実行 |
+| PR本文に Rendered structure differences が出た | Actions artifact `render-structure-report` のJSONで詳細を確認し、該当ページを修正する。`RENDER-ORPHAN` はミラー同期で削除されなかったja側の残存ページを示す |
 | PR本文の orphan cleanup で意図しない削除が出た | en側のディレクトリ再編・リネームに追随した削除かをPR diffで確認。ja側に意図的に残すファイルがある場合は仕組み上サポート外（enミラーが正） |
 | Bedrockのスロットリングが頻発する | ワークフロー env の `TRANSLATE_PARALLEL_JOBS`（デフォルト4）を下げる |
 | upstream へのPR作成失敗 | `UPSTREAM_PAT` の設定・有効期限・権限を確認 |

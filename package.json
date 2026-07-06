@@ -1,8 +1,10 @@
 {
   "private": true,
   "devDependencies": {
+    "cheerio": "^1.2.0",
     "markdownlint-cli": "^0.44",
     "textlint": "^14",
-    "textlint-rule-preset-ja-spacing": "^2"
+    "textlint-rule-preset-ja-spacing": "^2",
+    "tsx": "^4.23.0"
   }
 }

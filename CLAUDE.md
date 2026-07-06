@@ -53,9 +53,10 @@ gentksb/observability-workshop
     └── references/translation-guide.md
 
 .github/scripts/
-├── sync-ja-mirror.sh          # アセットミラー + orphan掃除（Phase 1）
-├── apply-en-patch.sh          # en diffのhunk単位機械適用（Phase 2）
-└── check-structure-parity.sh  # en/ja構造検証（Phase 3）
+├── sync-ja-mirror.sh                # アセットミラー + orphan掃除（Phase 1）
+├── apply-en-patch.sh                # en diffのhunk単位機械適用（Phase 2）
+├── check-structure-parity.sh        # en/ja構造検証・Markdownレベル（Phase 3）
+└── compare-rendered-structure.ts    # en/ja構造検証・hugo build後のDOM比較（Phase 3）
 
 .github/workflows/
 ├── sync-and-translate.yml

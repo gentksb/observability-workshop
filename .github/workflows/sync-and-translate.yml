@@ -164,6 +164,10 @@ jobs:
       mirror_report: ${{ steps.mirror.outputs.report }}
       parity_warning_count: ${{ steps.parity.outputs.warning_count }}
       parity_warnings: ${{ steps.parity.outputs.warnings }}
+      hugo_build_failed: ${{ steps.render-check.outputs.build_failed }}
+      hugo_build_log: ${{ steps.render-check.outputs.build_log }}
+      render_issue_count: ${{ steps.render-check.outputs.render_issue_count }}
+      render_warnings: ${{ steps.render-check.outputs.render_warnings }}
     steps:
       - name: Checkout main branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -855,6 +859,82 @@ jobs:
             echo "All translated files match the English structure"
           fi
 
+      - name: Install Hugo (version resolved from upstream build config)
+        if: steps.detect.outputs.has_files == 'true' || steps.mirror.outputs.changed == 'true'
+        run: |
+          # Hugoバージョンはupstreamのビルド定義に追従する（ハードコードしない）。
+          # 優先順: upstream CI (deploy-workshop.yml) → hugo.toml の module.hugoVersion.min
+          HUGO_VERSION=$(grep -oE "hugo-version: *'[0-9.]+'" .github/workflows/deploy-workshop.yml 2>/dev/null \
+            | grep -oE '[0-9.]+' | head -1)
+          if [ -z "$HUGO_VERSION" ]; then
+            HUGO_VERSION=$(grep -A3 '\[module.hugoVersion\]' hugo.toml 2>/dev/null \
+              | grep -oE 'min *= *"[0-9.]+"' | grep -oE '[0-9]+\.[0-9.]+' | head -1)
+          fi
+          if [ -z "$HUGO_VERSION" ]; then
+            echo "::error::Could not resolve Hugo version from upstream build config"
+            exit 1
+          fi
+
+          echo "Installing Hugo extended v${HUGO_VERSION}"
+          curl -sSLo /tmp/hugo.tar.gz \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+          sudo tar -xzf /tmp/hugo.tar.gz -C /usr/local/bin hugo
+          hugo version
+
+      - name: Build site and verify rendered structure
+        id: render-check
+        if: steps.detect.outputs.has_files == 'true' || steps.mirror.outputs.changed == 'true'
+        run: |
+          # Phase 3（E2E検証）: サイト全体をビルドし、jaコンテンツがビルドを壊して
+          # いないことを確認したうえで、レンダリング後HTMLのDOM構造骨格を en/ja で比較する。
+          # ビルド失敗はジョブを落とさず、PRをドラフト化して人間のレビューに委ねる
+          # （upstream起因のビルド失敗で自動リトライが空転するのを避けるため）
+          set +e
+          hugo --destination /tmp/site-build --cacheDir /tmp/hugo_cache --noChmod > /tmp/hugo_build.log 2>&1
+          HUGO_EXIT=$?
+          set -e
+
+          if [ "$HUGO_EXIT" -ne 0 ]; then
+            echo "::warning::hugo build failed (exit ${HUGO_EXIT})"
+            cat /tmp/hugo_build.log
+            echo "build_failed=true" >> $GITHUB_OUTPUT
+            echo "build_log<<BUILD_EOF" >> $GITHUB_OUTPUT
+            tail -30 /tmp/hugo_build.log >> $GITHUB_OUTPUT
+            echo "BUILD_EOF" >> $GITHUB_OUTPUT
+            echo "render_issue_count=0" >> $GITHUB_OUTPUT
+            echo "render_warnings=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "build_failed=false" >> $GITHUB_OUTPUT
+          echo "build_log=" >> $GITHUB_OUTPUT
+          tail -15 /tmp/hugo_build.log
+
+          # DOM構造比較（不一致があっても exit 1 にせず警告として集計する）
+          npx tsx .github/scripts/compare-rendered-structure.ts /tmp/site-build \
+            --report /tmp/render_report.json > /tmp/render_out.txt || true
+          cat /tmp/render_out.txt
+
+          ISSUE_LINES=$(grep -cE '^RENDER' /tmp/render_out.txt || true)
+          echo "render_issue_count=${ISSUE_LINES}" >> $GITHUB_OUTPUT
+
+          echo "render_warnings<<RENDER_EOF" >> $GITHUB_OUTPUT
+          grep -E '^RENDER' /tmp/render_out.txt | head -50 >> $GITHUB_OUTPUT || true
+          if [ "$ISSUE_LINES" -gt 50 ]; then
+            echo "... (truncated, see the render-structure-report artifact)" >> $GITHUB_OUTPUT
+          fi
+          echo "RENDER_EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload rendered-structure report
+        if: steps.render-check.outputs.build_failed == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: render-structure-report
+          path: |
+            /tmp/render_report.json
+            /tmp/render_out.txt
+          retention-days: 30
+
       - name: Commit translations
         id: commit
         if: steps.detect.outputs.has_files == 'true' || steps.mirror.outputs.changed == 'true'
@@ -915,6 +995,10 @@ jobs:
           MIRROR_REPORT: ${{ needs.sync-and-translate.outputs.mirror_report }}
           PARITY_WARNING_COUNT: ${{ needs.sync-and-translate.outputs.parity_warning_count }}
           PARITY_WARNINGS: ${{ needs.sync-and-translate.outputs.parity_warnings }}
+          BUILD_FAILED: ${{ needs.sync-and-translate.outputs.hugo_build_failed }}
+          BUILD_LOG: ${{ needs.sync-and-translate.outputs.hugo_build_log }}
+          RENDER_ISSUE_COUNT: ${{ needs.sync-and-translate.outputs.render_issue_count }}
+          RENDER_WARNINGS: ${{ needs.sync-and-translate.outputs.render_warnings }}
         run: |
           NEW_TAG="${{ needs.check-new-release.outputs.new_tag }}"
           TRANSLATED_COUNT="${{ needs.sync-and-translate.outputs.translated_count }}"
@@ -955,6 +1039,32 @@ jobs:
                 "" \
                 '```text'
               printf '%s\n' "${PARITY_WARNINGS}"
+              printf '%s\n' '```'
+            fi
+
+            # Hugo build failure section (PR is created as draft in this case)
+            if [ "${BUILD_FAILED:-false}" = "true" ]; then
+              printf '%s\n' \
+                "" \
+                "## :x: Hugo build failed" \
+                "" \
+                "The site build failed with this content. This PR was created as a **draft** and must not be merged until the build issue is resolved:" \
+                "" \
+                '```text'
+              printf '%s\n' "${BUILD_LOG}"
+              printf '%s\n' '```'
+            fi
+
+            # Rendered-structure warnings section (post-build DOM comparison)
+            if [ -n "${RENDER_ISSUE_COUNT:-}" ] && [ "${RENDER_ISSUE_COUNT}" != "0" ]; then
+              printf '%s\n' \
+                "" \
+                "## :warning: Rendered structure differences (en vs ja)" \
+                "" \
+                "After building the site, these pages differ from the English version in rendered DOM structure (headings, code blocks, images, links, or shortcode containers). Full report is attached as the \`render-structure-report\` workflow artifact:" \
+                "" \
+                '```text'
+              printf '%s\n' "${RENDER_WARNINGS}"
               printf '%s\n' '```'
             fi
 
@@ -1031,6 +1141,9 @@ jobs:
             if [ "$HAS_NEW_WORKSHOPS" = "yes" ]; then
               DRAFT_ARGS=(--draft)
               echo "Creating DRAFT PR (new workshops detected)"
+            elif [ "${BUILD_FAILED:-false}" = "true" ]; then
+              DRAFT_ARGS=(--draft)
+              echo "Creating DRAFT PR (hugo build failed)"
             else
               echo "Creating regular PR"
             fi

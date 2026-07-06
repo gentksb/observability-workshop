@@ -47,8 +47,9 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 3. **ミラー同期**: md以外のアセットを `content/en` → `content/ja` でミラーし、en側に対応物のないja側ファイルを削除
 4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳。既存訳のあるファイルは変更hunkだけを反映（機械パッチ → LLM差分翻訳 → 全文翻訳の3段フォールバック）
 5. **構造検証**: frontmatter・shortcode・見出し・コードフェンスを en/ja で比較し、不一致をPR本文に警告
-6. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップ検出時はドラフトPR）
-7. **タグ記録**: 翻訳したタグを`.last-translated-tag`に記録
+6. **ビルド + E2E構造検証**: サイト全体を hugo build（バージョンはupstream定義に追従）し、レンダリング後HTMLのDOM構造を en/ja ページペアで比較。ビルド失敗時はドラフトPR化
+7. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップ検出時・ビルド失敗時はドラフトPR）
+8. **タグ記録**: 翻訳したタグを`.last-translated-tag`に記録
 
 各フェーズの詳細・cleanupジョブ・自動リトライは [CLAUDE.md](./CLAUDE.md) を参照してください。
 
