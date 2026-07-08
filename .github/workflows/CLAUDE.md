@@ -15,25 +15,68 @@ upstreamリポジトリの新しいリリースを検出し、日本語に自動
 
 ### 手動実行オプション
 
-| オプション | 説明 | デフォルト |
-| --------- | ---- | --------- |
-| `force_translate` | 新しいタグがなくても翻訳を実行 | false |
-| `translate_all_untranslated` | すべての未翻訳コンテンツも翻訳 | false |
-| `cleanup_only` | sync/translate/PR作成をスキップし、cleanup ジョブだけを実行 | false |
-| `cleanup_dry_run` | cleanup の対象一覧を出力するだけで close/delete を実行しない | false |
-| `cleanup_max_prs` | 1回の実行で処理する陳腐化PRの上限（安全装置） | 10 |
+実行目的を `run_mode` で1つ選ぶ。boolean の組み合わせは廃止した。
+
+| オプション | 値 / デフォルト | 使いどころ |
+| --------- | -------------- | ---------- |
+| `run_mode` | `auto`（デフォルト） | 定期実行と同じ。新リリースがあれば同期・翻訳する |
+| | `retranslate-latest` | 翻訳品質に問題があったとき、最新リリース分（1つ前の翻訳タグとの差分）を訳し直す。比較ベースは `.last-translated-tag` のgit履歴から自動取得。レジューム復元は行わず全文翻訳する |
+| | `fill-missing-translations` | 過去に失敗・スキップした未翻訳ファイル（`content/ja` に存在しないもの）を補完する。差分翻訳は行わない |
+| | `cleanup-only` | 翻訳せず、陳腐化PRクローズ・forkブランチ削除だけを実行する |
+| `dry_run` | false | 掃除の安全確認。クローズ・削除対象を一覧表示するだけで実行しない |
+| `retry_attempt` | 0 | 内部用。タイムアウト自動リトライのカウンタ。手動実行では変更しない |
+
+陳腐化PRの1回あたり処理上限はワークフロー env `CLEANUP_MAX_PRS`（既定 10）にハードコードしている。
 
 ### 処理フロー
+
+翻訳ジョブは「機械同期 → 翻訳 → 構造検証」の3フェーズで構成し、LLMが生成するのは本文プローズだけに限定する。これにより英語版と日本語版で本文以外の差分が発生しにくくなる。
 
 1. **新リリースチェック**: upstreamの最新タグを取得し、`.last-translated-tag` と比較
 2. **mainブランチ同期**: 新しいタグがあれば、mainをupstreamのタグにリセット
 3. **新ワークショップ検出**: 翻訳対象ファイルから新しいワークショップディレクトリを検出
-4. **翻訳**: 変更されたファイルをClaude Code (Bedrock)で翻訳。前回実行が途中で失敗していた場合は、リモートの `translate/{tag}` ブランチから翻訳済みファイルを復元し、未翻訳分のみを翻訳して再開する（レジューム）
-5. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップがある場合はドラフトPR）
-6. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
-7. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
-8. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
-9. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
+4. **ミラー同期（Phase 1・機械）** (`sync-ja-mirror.sh`): md以外のアセット（画像等）を `content/en` → `content/ja` で常時ミラーし、en側に対応物のない ja側ファイル・ディレクトリ（レガシー資産）を削除。変更一覧はPR本文に記載
+5. **翻訳（Phase 2・3段フォールバック）**: 変更されたファイルをClaude Code (Bedrock)で翻訳。マージ済みの既存訳があるファイルは全文再翻訳せず、enの変更hunkだけを反映する（後述）。前回実行が途中で失敗していた場合は、リモートの `translate/{tag}` ブランチから翻訳済みファイルを復元し、未翻訳分のみを翻訳して再開する（レジューム）
+6. **構造検証（Phase 3・機械）** (`check-structure-parity.sh`): frontmatterキー・shortcode・見出しレベル・コードフェンス数を en/ja で比較し、不一致をPR本文に警告として記載
+7. **ビルド + E2E構造検証（Phase 3・機械）** (`compare-rendered-structure.ts`): サイト全体を hugo build し、レンダリング後HTMLのDOM構造骨格を en/ja ページペアで比較。ビルド失敗時はPRをドラフト化
+8. **PR作成**: upstreamリポジトリにPRを作成（新ワークショップ検出時・ビルド失敗時はドラフトPR）
+9. **陳腐化PRクローズ** (`cleanup-stale-prs`): 新PRより番号が小さい open な `translate/*` PR を upstream から自動クローズ。レビュー痕跡や人手コミットのある PR は skip して Slack に通知
+10. **forkブランチ掃除** (`cleanup-fork-branches`): upstream PR が closed/merged の `translate/v*` ブランチを fork から削除
+11. **タグ記録**: 翻訳したタグを `.last-translated-tag` に記録
+12. **失敗時の自動リトライ** (`retry-on-failure`): 翻訳ジョブが失敗（タイムアウト含む）した場合、同一設定で自身を再dispatch（最大2回）。レジュームにより未翻訳分のみ処理される
+13. **Slack通知**: ワークフロー実行結果を Slack に通知（新リリースなし・翻訳対象なしの場合も含む）
+
+補助スクリプトは `ja-translation-system` ブランチの `.github/scripts/` で管理し、`Setup translation tools` ステップで translate ブランチの作業ツリーに取得する（indexには乗せないためコミットに混入しない）。
+
+### 翻訳の3段フォールバック
+
+マージ済みの既存訳（タグのコミットと一致し日本語を含む `content/ja` ファイル）がある変更ファイルは、次の順で処理する。新規ファイル・既存訳なし・`retranslate-latest` モードは最初から全文翻訳。
+
+1. **機械パッチ（トークン消費ゼロ）** (`apply-en-patch.sh`): en側の `last_tag..new_tag` diff をhunk単位で ja ファイルに `git apply`。コードブロック・URL・英語のまま維持された箇所への変更（typo修正の大半）はここで反映される
+2. **LLM差分翻訳**: 機械適用できなかったhunk（翻訳済みプローズへの変更）だけをdiffとしてLLMに渡し、既存訳への最小Editを生成。既存訳を保持するため訳ブレが減り、全文再翻訳よりトークン消費が大幅に少ない
+3. **全文翻訳**: 1・2が失敗した場合のフォールバック（従来方式）
+
+### hugo build と E2E構造検証
+
+翻訳・ミラー同期の完了後、コミット前にサイト全体をビルドして最終検証する。
+
+**hugo build**:
+
+- Hugoバージョンは upstream のビルド定義から実行時に解決する（優先順: `deploy-workshop.yml` の `hugo-version` → `hugo.toml` の `module.hugoVersion.min`）。ハードコードしないため、upstream のHugo更新に自動追従する
+- translate ブランチは upstream 完全コピーのため、Hugo設定・テーマ（Hugo modules、要Go。GitHubホストランナーにプリインストール済み）はそのまま使える
+- ビルド失敗時はジョブを落とさず、PRを**ドラフト**で作成し、PR本文にビルドログ末尾を記載する（upstream起因の失敗で自動リトライが空転するのを避けるため）
+
+**E2E構造検証** (`compare-rendered-structure.ts`、TypeScript + cheerio):
+
+- ビルド出力の `public/en/**/index.html` と `public/ja/**/index.html` をページ単位でペアリングし、本文コンテナ（`article#content`）のDOM構造骨格を比較する
+- 比較する不変量: 見出しレベルの順列、コードブロックの数と正規化テキストのハッシュ、画像srcファイル名の順列、外部リンク集合、内部リンク本数、shortcode由来コンテナ（`.tabs` / `.callout` / `table` / `details`）の順列
+- パンくず・ページャー・TOC等のナビゲーション（`nav` / `aside`）は、ja側の未翻訳ページの有無でリンク数が正当に変わるため比較から除外する
+- en対応ページのないja側ページ（orphan）も検出する（ミラー同期の最終確認を兼ねる）
+- 結果はPR本文の警告セクション（50行まで）と、Actions artifact `render-structure-report`（JSONフルレポート、保持30日）に出力する
+
+### 翻訳ルールの注入
+
+translate ブランチには `.claude/` のSkillが存在しないため、翻訳ルール（用語集・文体・構造維持）は `ja-translation-system` ブランチの `translation-guide.md` を取得し、全claude呼び出しに `--append-system-prompt` で注入する。翻訳ルールの正本は `.claude/skills/splunk-workshop-ja-translator/references/translation-guide.md` の1ファイルで、ローカルSkill実行とCI実行の両方が同じルールを参照する。
 
 ### 陳腐化 PR / fork ブランチの自動整理
 
@@ -44,19 +87,25 @@ upstream のマージが翻訳PR生成より遅いと、古い未マージ翻訳
 - upstream の open な `translate/*` PR を fork 所有者で絞り込み
 - 新しく作成した PR の番号より小さいものを対象とし、`gh pr view --json commits,reviews` で人手コミット・非PENDINGレビューがあるものは skip
 - skip しなかった対象に「Superseded by #N (translation for vX.Y). Closing this PR.」コメントを残してクローズ
-- `cleanup_max_prs` 件まで処理。`cleanup_dry_run=true` の場合は対象一覧の echo だけ実行
-- `cleanup_only=true` で dispatch すると、新PR作成をスキップして cleanup のみを実行（`needs.create-pr.outputs.pr_number` が空の場合は最新マージ済み翻訳PRを参照値として使用）
+- env `CLEANUP_MAX_PRS`（既定 10）件まで処理。`dry_run=true` の場合は対象一覧の echo だけ実行
+- `run_mode=cleanup-only` で dispatch すると、新PR作成をスキップして cleanup のみを実行（`needs.create-pr.outputs.pr_number` が空の場合は最新マージ済み翻訳PRを参照値として使用）
 
 **`cleanup-fork-branches`**:
 
 - `git ls-remote --heads origin 'translate/v*'` で fork のブランチ一覧を取得
 - 各ブランチの upstream 側 PR 状態を確認し、`MERGED` / `CLOSED` / `NONE` のものを `git push origin --delete` で削除
 - 現在進行中の `translate/{NEW_TAG}` は除外
-- `cleanup_dry_run=true` の場合は `[DRY-RUN] would delete ...` を echo するだけ
+- `dry_run=true` の場合は `[DRY-RUN] would delete ...` を echo するだけ
+
+**レガシー翻訳ファイルの掃除**（`sync-ja-mirror.sh`、翻訳ジョブ内）:
+
+- en側に対応物のない `content/ja` のファイル・ディレクトリを削除し、md以外のアセットを en から常時ミラー
+- 削除・更新一覧はPR本文の「Asset sync and orphan cleanup」セクションに記載され、upstream PRレビューが安全弁になる
+- upstreamのディレクトリ再編（例: ninja-workshops の番号付き構造→カテゴリ名への変更）にjaが追従していない場合、初回実行では削除が数百ファイル規模になりうる。PR diffを必ず確認すること
 
 **安全装置**:
 
-- `cleanup_max_prs` (default 10) で1回の実行件数を制限し、初回事故時の被害を局所化
+- env `CLEANUP_MAX_PRS` (default 10) で1回の実行件数を制限し、初回事故時の被害を局所化
 - 各操作は `|| true` でループ続行。失敗しても次回実行で再試行可能
 - `concurrency: sync-and-translate` グループで並走防止
 
@@ -74,14 +123,16 @@ Bedrockへの認証は `aws-actions/configure-aws-credentials` ではなく、AW
 
 GitHub OIDC トークンは `id-token: write` 権限があればジョブ実行中いつでも再発行できるため、ジョブ全体の実行時間はセッション上限に縛られません（上限はジョブの `timeout-minutes: 300` のみ）。
 
-### 翻訳のレジューム（途中再開）
+### 翻訳のレジューム（途中再開）と自動リトライ
 
 翻訳ジョブが途中で失敗・タイムアウトした場合でも、`Push translation branch` まで到達していれば翻訳結果はリモートの `translate/{tag}` ブランチに残ります。同じタグで再実行すると:
 
-1. `Create translation branch` ステップがリモートの同名ブランチから `content/ja/` を復元
+1. `Create translation branch` ステップがリモートの同名ブランチから `content/ja/` を復元（`retranslate-latest` モードは「訳し直し」が目的のため復元しない）
 2. `Translate files` ステップが「ベースコミット（タグ）と差分があり、かつ日本語を含む」ファイルをスキップ（成功扱い）し、未翻訳分のみを翻訳
 
-mainに既にマージ済みの古い翻訳はベースコミットと一致するため、スキップ対象にならず正しく再翻訳されます。
+mainに既にマージ済みの古い翻訳はベースコミットと一致するため、スキップ対象にならず、既存訳を保持した差分パッチ方式で処理されます。
+
+さらに `retry-on-failure` ジョブが、翻訳ジョブの失敗を検知すると同一の `run_mode` で自身を再dispatchします（`retry_attempt` カウンタで最大2回に制限）。`workflow_dispatch` は `GITHUB_TOKEN` の再帰トリガー制限の例外のため、PATなしで動作します。手動での再実行が必要になるのは、自動リトライ2回でも完了しなかった場合のみです。
 
 ### 新ワークショップ検出とドラフトPR
 
@@ -201,10 +252,15 @@ GitHub ActionsからAWS Bedrockにアクセスするために、OIDCプロバイ
 
 | 問題 | 確認事項 |
 | ---- | ------- |
-| 翻訳が実行されない | upstreamに新しいタグがあるか確認。手動実行で `force_translate` を有効化。`.last-translated-tag` の内容を確認 |
+| 翻訳が実行されない | upstreamに新しいタグがあるか確認。`.last-translated-tag` の内容を確認。翻訳し直したい場合は `run_mode=retranslate-latest`、未翻訳の穴埋めは `run_mode=fill-missing-translations` で手動実行 |
 | 翻訳が失敗する | AWS認証情報の設定を確認。Claude Code CLIのバージョンを確認。ログでエラーメッセージを特定 |
 | `ExpiredToken` / 認証エラーで失敗する | `Configure refreshable AWS credentials` ステップの `aws sts get-caller-identity` 検証結果を確認。`AWS_ROLE_ARN` シークレットとIAMロールの信頼ポリシー（OIDCプロバイダー設定）を確認 |
-| ジョブがタイムアウトした | 同じタグでワークフローを再実行する。翻訳済みファイルはリモートの `translate/{tag}` ブランチから復元・スキップされ、未翻訳分のみ翻訳される |
+| ジョブがタイムアウトした | `retry-on-failure` ジョブが最大2回まで自動で再dispatchする（レジュームにより未翻訳分のみ処理）。それでも完了しない場合のみ手動で再実行 |
+| 翻訳品質に問題があるファイルが混ざった | `run_mode=retranslate-latest` で最新リリース分を全文訳し直す（レジューム復元は行われない） |
+| PR本文に Structure parity warnings が出た | 該当ファイルの frontmatter・shortcode・見出し・コードフェンスを en 側と目視比較し、PR上で修正する。恒常的に出る場合は翻訳ルール（translation-guide.md）の強化を検討 |
+| PRがドラフトで作成され Hugo build failed が出た | PR本文のビルドログを確認。jaコンテンツ起因（shortcode誤記等）ならPR上で修正、upstream起因なら解消後に再実行 |
+| PR本文に Rendered structure differences が出た | Actions artifact `render-structure-report` のJSONで詳細を確認し、該当ページを修正する。`RENDER-ORPHAN` はミラー同期で削除されなかったja側の残存ページを示す |
+| PR本文の orphan cleanup で意図しない削除が出た | en側のディレクトリ再編・リネームに追随した削除かをPR diffで確認。ja側に意図的に残すファイルがある場合は仕組み上サポート外（enミラーが正） |
 | Bedrockのスロットリングが頻発する | ワークフロー env の `TRANSLATE_PARALLEL_JOBS`（デフォルト4）を下げる |
 | upstream へのPR作成失敗 | `UPSTREAM_PAT` の設定・有効期限・権限を確認 |
 | `refusing to allow ... without workflows permission` エラー | `FORK_SYNC_PAT` 未設定または `Workflows: Read and write` 権限不足。GitHub の Fine-grained PAT を再発行し fork リポジトリのみに `Contents` + `Workflows` の write を付与 |
